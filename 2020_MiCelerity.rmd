@@ -1,0 +1,881 @@
+---
+title: '"MiCelerity for Substance Abuse Report- Bloomberg"'
+author: "Samantha L Bell"
+date: "10/5/2020"
+output: html_document
+---
+
+---------------------------
+____________________________________________________________________________________
+What does this script need?
+____________________________________________________________________________________
+
+This script takes in:
+1- A download from MiCelerity (MDHHS MDSS), with header removed and saved in .xlsx format
+
+____________________________________________________________________________________
+What does this script do?
+____________________________________________________________________________________
+Cleans and creates summaries from the extract, focusing on demographics and patient patterns
+
+__________________________________________________________________________________
+INSTRUCTIONS
+____________________________________________________________________________________
+1- Fill in required necessary information in fields that look like this: 
+# ************************************************************************************#
+#      Text Here
+#
+# ************************************************************************************#
+2- Then click the green run button for each block of code
+
+
+Load the necessary library packages
+```{r packages}
+library(knitr)
+library(openxlsx)
+library(writexl)
+library(tidyverse)
+library(summarytools)
+library(anytime)
+library(epiR)
+library(scales)
+library(lubridate)
+library(eeptools)
+library(stringr)
+library(stats)
+```
+
+Provide the location of the raw data, name of input file, and location for output files to be saved
+```{r provideLocation}
+# ************************************************************************************#
+inLocation <- "S:/Health/Epidemiology/Data/MiCelerity/Substance Abuse - Bloomberg/Raw"
+
+outLocation <- "S:/Health/Epidemiology/Data/MiCelerity/Substance Abuse - Bloomberg/Results"
+
+inFile <- "Mar2020-Feb2021 yr.xlsx"
+# ************************************************************************************#
+
+# Workbook to be written at the end with all results:
+wb <- createWorkbook() # for various result pages
+wb_Full <- createWorkbook() # for the main full data subsets
+```
+
+Load the raw data
+```{r loadData}
+celerityData_all <-  readWorkbook(paste0(inLocation, "/", inFile), sheet = 1, na.strings = c('NA', '#N/A', ''), detectDates = TRUE) 
+```
+
+Rename the poisoning classifications to allow for clarity
+  According to the MiCelerity documentation, all "Not a poisoning" events are events with ICD-10-CM codes related to prenatal exposure through breastmilk or neonatal withdrawl symptoms, or fetal alcohol syndrome. All events marked as "Other" are events with ICD-10-CM codes for toxic effects of alcohol. 
+```{r reclassify}
+celerityData_all <- celerityData_all %>% mutate(Poisoning.Classification = case_when(
+  Poisoning.Classification == "Other" ~ "Alcohol-Toxicity",
+  Poisoning.Classification == "Not a poisoning" ~ "Neonatal/Fetal",
+  TRUE ~ Poisoning.Classification
+))
+```
+
+
+Filter the data for residency and poisoning classification. 
+Make a neonatal subset (all residencies included)
+```{r filter}
+# What is the breakdown of Detroit residents (in and out of Detroit hospitals) vs Detroit visits by non-residents?
+table(celerityData_all$County)
+
+# A separate subset for neonatal poisonings, as they do not have address complete in most cases
+neonatal <- celerityData_all[celerityData_all$Poisoning.Classification=="Neonatal/Fetal",]
+
+# Filter for Detroit City Residents only
+celerityData <- celerityData_all[grep("Detroit City",celerityData_all$County, ignore.case = TRUE),]
+
+# What is the breakdown of probable (overdoses, T ICD-codes) and possible (poisonings, ongoing substance disorders, F ICD codes) poisonings?
+table(celerityData$Poisoning.Classification)
+```
+Filter for probable poisonings classifications and alcohol toxicities (remove possibles)
+```{r probables}
+celerityData <- celerityData[celerityData$Poisoning.Classification=="Probable"|celerityData$Poisoning.Classification=="Alcohol-Toxicity",]
+```
+
+
+Run this to include only 
+Colors for plots later - these are taken from Detroit City style guides
+```{r colors}
+detroitColors <- c("#4e79a7", "#c4ced3", "#74a9cf", "#004445",	"#279989",	"#9fd5b3","#feb70d",	"#18252a",
+                   "#f2f2f2","#2e3761",	"#5f355a",	"#94456c", "#cb4d4f",	"#b6683a",	"#629547",	"#a3c76f", 
+                   "#b9ddf1", "#f28e2b", "#ffbe7d", "#607c97", "#899eb3","#e5ba64", "#e7cea2")
+```
+
+******************************************************
+              SETUP AND CLEANING
+******************************************************
+
+Simplify facility names to get a simplified name without added characters
+```{r}
+split_facility <- function(row){
+  str_split(celerityData$Facility, ":")[[row]][[1]]
+}
+Simple_Facility_Name <- lapply(1:dim(celerityData)[1],split_facility)
+Simple_Facility_Name <- unlist(Simple_Facility_Name)
+celerityData <- cbind(celerityData, Simple_Facility_Name)
+```
+
+Print a table of the drug classes and sub-types, with event and visit counts      
+```{r drugClassesTypes}
+drug_classes <- celerityData %>% group_by(Drug.Class) %>% summarise(visit_count=length(unique(Visit.Id)), event_count = n())
+addWorksheet(wb, "Drug Classes-all events") # Make an empty page in the workbook
+writeData(wb, "Drug Classes-all events", drug_classes, startRow = 1, startCol = 1) # Write to workbook
+drug_classes
+```
+
+Simplify the admission and discharge dates by removing the time stamp
+```{r admissionDate}
+# Format the dates
+celerityData$Admission.Date <- anydate(str_match(celerityData$Admission.Date,"\\d{2}\\/\\d{2}\\/\\d{4}")[,1])
+celerityData$Discharge.Date <- anydate(str_match(celerityData$Discharge.Date,"\\d{2}\\/\\d{2}\\/\\d{4}")[,1])
+```
+
+
+
+Make age and race groupings - SET AGES OVER 100 years to NA
+Flag for patients that have multiple event rows and multiple dates by using Patient Id 
+Simplify one of the drug class names
+Note events specified as Initial or Subsequent encounters
+Count number of events per patient
+```{r newVars}
+# Calculate a patient age using Date of Birth and Admission Date
+# Calculated age of years from birth to admission, get the digits before the decimal point. (so 49.8 years would still be a 49 year-old, not rounded to a 50 year-old)
+celerityData$calcAge <- ""
+for(i in 1:dim(celerityData)[1]){
+  if(!is.na(celerityData$Birth.Date[i])){
+    celerityData$calcAge[i] <- str_split(age_calc(anydate(celerityData$Birth.Date[i]), anydate(celerityData$Admission.Date[i]), units = "years"), "\\.", simplify = TRUE)[,1]
+  }else{celerityData$calcAge[i] <- NA}
+}
+# Make the new age numeric
+celerityData$calcAge <- as.numeric(celerityData$calcAge)
+
+# If the Race category has a trailing space after the word for the race, remove it
+celerityData <- celerityData %>% mutate(
+  Race = case_when(substr(Race, nchar(Race), nchar(Race))==" " ~ substr(Race, 1, nchar(Race)-1)
+  ))
+
+celerityData <- celerityData %>% mutate(
+    Age_Range = factor(case_when( # Make age range categories
+      calcAge < 1             ~ 1,
+      calcAge >=1 & calcAge<10    ~ 2,  # cannot use range 1:9 due to decimals
+      calcAge >=10 & calcAge<20   ~ 3,
+      calcAge >=20 & calcAge<30   ~ 4,
+      calcAge >=30 & calcAge<40   ~ 5,
+      calcAge >=40 & calcAge<50   ~ 6,
+      calcAge >=50 & calcAge<60   ~ 7,
+      calcAge >=60 & calcAge<70   ~ 8,
+      calcAge >=70 & calcAge<80   ~ 9,
+      calcAge >= 80 & calcAge <=100 ~ 10, 
+      calcAge > 100           ~ 11),
+      levels = c(1,2,3,4,5,6,7,8,9,10,11), 
+      labels = c("Less_than_1", "1-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70-79", ">= 80", "NA")),
+    Simple_Race = case_when(
+      grepl("Other", Race) | grepl("Asian", Race) | grepl("American Indian or Alaska Native", Race) | grepl("Hawaiian or Pacific Islander", Race) ~ "Other", 
+      TRUE ~ Race
+      ), 
+    Repeat_or_Initial = case_when(
+      grepl("initial encounter", Diagnosis.Description) ~ "Initial Encounter",
+      grepl("subsequent encounter", Diagnosis.Description) ~ "Subsequent Encounter"
+    ), 
+    Repeated_Patient_Id = duplicated(Patient.Id)|duplicated(Patient.Id, fromLast = TRUE),
+    Accidental = case_when(grepl("accidental", Diagnosis.Description, ignore.case = TRUE) ~ "Y",
+                           TRUE ~ "N")
+)
+
+# Age over 100 set to NA
+celerityData$calcAge[celerityData$calcAge>100] <- NA
+
+# Find repeated patients that were seen on multiple event dates
+celerityData$Seen_Multiple_Dates <- ""
+suppressWarnings(for(p in 1:length(celerityData$Patient.Id)){
+  id <- celerityData$Patient.Id[p]
+  if(celerityData$Repeated_Patient_Id[celerityData$Patient.Id==id]=="TRUE" &
+     length(unique(celerityData$Admission.Date[celerityData$Patient.Id==id]))>1){
+    celerityData$Seen_Multiple_Dates[p] <- "TRUE"}else{celerityData$Seen_Multiple_Dates[p] <- "FALSE"}
+  })
+
+# Shorten the printed name of one class for ease of making graphs
+celerityData$Drug.Class <- gsub("Antiepileptics and Sedative-Hypnotics", "Anti-E & Sedative", celerityData$Drug.Class)
+
+# Counting the total occurrences of each patient Id and total visit counts
+celerityData <- celerityData %>% add_count(Patient.Id, name = "Event Count Total") %>% add_count(Visit.Id, name = "Visit Count Total")
+
+```
+
+
+1) Mark the first event for each patient
+2) Mark duplicate events that occur on the same day for each patient
+# For each unique patient Id
+  1- find the earliest admission date and mark as "Y" in the First_Event column
+  2- find admission dates where the number of events on that day for the unique patient Id sum to greater than 1 (more than one event for this patient on this date) and mark as "Y" in the Same_Day_Event column
+  3- Capture lists of relevant info for all visits during this date for this patient
+```{r dupEvents}
+# Set up empty columns
+celerityData$First_Event <- "N"
+celerityData$Same_Day_Event <- ""
+celerityData$Dummy <- 1 #Dummy column to allow counting of any selection of rows
+celerityData$Same_Day_Diagnoses <- ""
+celerityData$Same_Day_Classification <- ""
+celerityData$Same_Day_Drug.Class <- ""
+celerityData$Same_Day_Drug.Type <- ""
+
+
+for(id in celerityData$Patient.Id){
+  first <- min(celerityData$Admission.Date[celerityData$Patient.Id==id]) 
+  celerityData$First_Event[celerityData$Admission.Date==first & celerityData$Patient.Id==id] <- "Y"
+  for(d in celerityData$Admission.Date[celerityData$Patient.Id==id]){
+    rows <- which(celerityData$Admission.Date==d&celerityData$Patient.Id==id)
+    if(sum(celerityData$Dummy[celerityData$Patient.Id==id & celerityData$Admission.Date==d])>1){
+      celerityData$Same_Day_Event[celerityData$Admission.Date==d & celerityData$Patient.Id==id] <- "Y"
+      celerityData$Same_Day_Diagnoses[rows] <- list(celerityData$Diagnosis.Description[celerityData$Patient.Id==id])
+      celerityData$Same_Day_Classification[rows] <- list(celerityData$Poisoning.Classification[celerityData$Patient.Id==id])
+      celerityData$Same_Day_Drug.Class[rows] <- list(celerityData$Drug.Class[celerityData$Patient.Id==id])
+      celerityData$Same_Day_Drug.Type[rows] <- list(celerityData$Drug.Type[celerityData$Patient.Id==id])
+    }
+  }
+}
+
+# Check assignment of same day event flags, and number of same-day events per patient
+check_SD <- celerityData %>% group_by(Patient.Id, Admission.Date, Same_Day_Event) %>% summarise(n=n())
+table(check_SD$Same_Day_Event, check_SD$n)
+```
+
+
+
+Subsets of the full data
+```{r}
+# Containing first admission date for each unique patient 
+  # Each unique patient may have more than one row on the same admission date!
+celerityData_firstAdmission <- celerityData %>%  filter(First_Event == "Y")
+
+# Containing ONLY the events AFTER the first admission date for each unique patient. (repeat patients only, does NOT include the 1st admission date)
+  # Each unique patient may have more than one row on the same admission date!
+celerityData_subsequent_admissions <- anti_join(celerityData, celerityData_firstAdmission, by = "Event.Id")
+
+#-----------------------------------------------------------------------
+# Table with one single patient row within each drug class
+  # A patient may be represented in more than one class
+  # Each class has no duplicate patients within it
+celerityData_single_patient_per_class <- celerityData %>% group_by(Patient.Id, Drug.Class) %>% summarise(`Event Count Within Class`=n()) 
+
+# Get the most recent demographics for each of the single patient records
+celerityData_single_patient_per_class$Age_Range <- ""
+celerityData_single_patient_per_class$calcAge <- ""
+celerityData_single_patient_per_class$Sex <- ""
+celerityData_single_patient_per_class$Ethnicity <- ""
+celerityData_single_patient_per_class$Simple_Race <- ""
+n <- 1
+
+# Loop through the ids and collect the most recent age range, max age, race, sex, and ethnicity from the original dataset
+for(i in celerityData_single_patient_per_class$Patient.Id){ 
+  celerityData_single_patient_per_class$Age_Range[n] <-
+    as.character(celerityData$Age_Range[celerityData$Patient.Id==i][length(celerityData$Age_Range[celerityData$Patient.Id==i])])
+  
+  celerityData_single_patient_per_class$calcAge[n] <- 
+    max(celerityData$calcAge[celerityData$Patient.Id==i])
+  
+  celerityData_single_patient_per_class$Sex[n] <-
+    celerityData$Sex[celerityData$Patient.Id==i][length(celerityData$Sex[celerityData$Patient.Id==i])]
+  
+  celerityData_single_patient_per_class$Ethnicity[n] <-
+    celerityData$Ethnicity[celerityData$Patient.Id==i][length(celerityData$Ethnicity[celerityData$Patient.Id==i])]
+  
+  celerityData_single_patient_per_class$Simple_Race[n] <-
+    celerityData$Simple_Race[celerityData$Patient.Id==i][length(celerityData$Simple_Race[celerityData$Patient.Id==i])]
+  n <- n+1
+}
+
+# Mark duplicate instances of a patient ID across drug classes within this dataframe
+  #(will allow for demographics to be pulled out when not broken up by drug class 
+    # - one row will remain unflagged per patient within the entire dataframe )
+celerityData_single_patient_per_class <- celerityData_single_patient_per_class %>% mutate(
+  duplicated_Ids = duplicated(Patient.Id)) %>% add_count(Patient.Id, name = "Number_of_drug_classes_per_patient")
+
+# Create field for sum of all event counts in all drug classes for each patient
+# make sure age is numeric
+celerityData_single_patients_all <- celerityData_single_patient_per_class %>% filter(duplicated_Ids==FALSE) %>% 
+  mutate(`Event Count All Classes` =  sum(celerityData_single_patient_per_class$`Event Count Within Class`[celerityData_single_patient_per_class$Patient.Id==Patient.Id]), 
+         calcAge = as.numeric(calcAge))  %>% select(-Drug.Class, -`Event Count Within Class`)
+```
+
+Table patients - unique within each drug class, each patient may appear in more than one class
+```{r withClassTables}
+addmargins(table(celerityData_single_patient_per_class$Sex, celerityData_single_patient_per_class$Drug.Class))
+addmargins(table(celerityData_single_patient_per_class$Simple_Race, celerityData_single_patient_per_class$Drug.Class))
+addmargins(table(celerityData_single_patient_per_class$Ethnicity, celerityData_single_patient_per_class$Drug.Class))
+addmargins(table(celerityData_single_patient_per_class$Age_Range, celerityData_single_patient_per_class$Drug.Class))
+```
+
+Table patients - unique with the dataset
+```{r uniqueAllTables}
+celerityData_single_patients_all %>% group_by(Sex) %>% summarise(n =n(), percent = round(n()/dim(celerityData_single_patients_all)[1]*100, digits = 0))
+celerityData_single_patients_all %>% group_by(Simple_Race) %>% summarise(n =n(), percent = round(n()/dim(celerityData_single_patients_all)[1]*100, digits = 0))
+celerityData_single_patients_all %>% group_by(Ethnicity) %>% summarise(n =n(), percent = round(n()/dim(celerityData_single_patients_all)[1]*100, digits = 0))
+celerityData_single_patients_all %>% group_by(Age_Range) %>% summarise(n =n(), percent = round(n()/dim(celerityData_single_patients_all)[1]*100, digits = 0))
+```
+
+***************************
+        ANALYZE
+***************************
+
+
+Table to summarize the count of poisonings by drug class and poisoning type - by ALL events
+```{r drugClassTable}
+# For later use
+drug_classes <- table(celerityData$Drug.Class)
+
+# A nice table to view by type and poisoning class
+drug_classes_table <- table(celerityData$Drug.Class, celerityData$Poisoning.Classification)
+cat("Drug Class and Poisoning Classification for ALL Events")
+
+# Save to file and view
+addWorksheet(wb, "Drug + Poisoning Classes")
+writeData(wb, "Drug + Poisoning Classes", drug_classes_table, startRow = 1, startCol = 1)
+drug_classes_table
+```
+
+Plot the ages affected in each drug class
+```{r drugClassAge}
+# Use drug class as a factor, and age in years as the y axis to make box plots
+addWorksheet(wb, "Box Plot Age")
+p <- plot(y = as.numeric(celerityData_single_patient_per_class$calcAge), x = as.factor(celerityData_single_patient_per_class$Drug.Class), col = detroitColors[c(3:6,8:12)], xlab = "", ylab = "Age in Years", cex.axis = 0.6 )
+title(main="Age of patients by drug class", sub = "(Deduplicated within each drug class)", col.main="black")
+insertPlot(wb, "Box Plot Age", fileType = "png", width = 10, height = 5, startCol = 25) # Add the displayed plot to a worksheet
+rownames(p$stats) <- c("minimum", "first quartile", "median", "third quartile", "maximum")
+colnames(p$stats) <- sort(unique(celerityData_single_patient_per_class$Drug.Class))
+colnames(p$conf) <- sort(unique(celerityData_single_patient_per_class$Drug.Class))
+p$outliers <- cbind(p$out, p$group) # Make the outliers table pretty
+writeData(wb, "Box Plot Age", p[1], startRow = 7)
+writeData(wb, "Box Plot Age", p[2], startRow = 14)
+writeData(wb, "Box Plot Age", p[3], startRow = 16)
+writeData(wb, "Box Plot Age", p[7], startRow = 20)
+p # See the stats
+
+# -----------------------------------------------------------------------------------
+# Make a similar boxplot, but also parse out race as a factor
+addWorksheet(wb, "Box Plot Age Race")
+filteredRace <- celerityData_single_patient_per_class %>% filter(Simple_Race!="NA" & Simple_Race!="Unknown")
+p2 <- ggplot(filteredRace, aes(x=as.factor(filteredRace$Simple_Race),
+                                                        y=as.numeric(filteredRace$calcAge), 
+                                                        fill = filteredRace$Drug.Class)) + 
+  geom_boxplot() +
+  ggtitle(paste("Cases by Drug Class, Age and Race ( n = ", dim(filteredRace)[1], ")")) +
+  stat_summary(fun.y=median, geom="point", shape=23, size=8, color="black", fill=detroitColors[7]) +
+  xlab("(median by race shown by yellow diamond)") +
+  ylab("Age in Years") +
+  labs(fill = "Drug Class") +
+  scale_fill_manual(values = detroitColors[c(3:6,8:12)])
+p2
+insertPlot(wb, "Box Plot Age Race", fileType = "png", width = 10, height = 5, startCol = 25) # Add the displayed plot to a worksheet
+# See the stats 
+p2$stats <- ggplot_build(p2)$data # add them to the plot metadata
+getCounts <- filteredRace %>% group_by(Simple_Race, Drug.Class) %>% summarise(n = n()) # Get the n for each box
+p2$stats[[1]]$n <- getCounts$n # Add n to the stats
+ # Add the class names that correlate to the fill colors
+colorKey <- tibble(detroitColors[c(3:6,8:12)], sort(unique(filteredRace$Drug.Class))) %>% rename(fill = `detroitColors[c(3:6, 8:12)]`, class = `sort(unique(filteredRace$Drug.Class))`)
+p2$stats[[1]] <- left_join(p2$stats[[1]], colorKey, by = "fill")
+p2$stats_clean <- p2$stats[[1]][,c(24, 25, 2:9)] # Pull relevant columns
+p2$stats_clean #view
+writeData(wb, "Box Plot Age Race", p2$stats_clean, startRow = 7)
+```
+
+Show the median age by race, sex and class
+```{r medianAges}
+medianAll <- celerityData_single_patient_per_class %>% filter(!is.na(calcAge)) %>% group_by(Drug.Class) %>% 
+  summarise(n = n(), median_Age = median(as.numeric(calcAge)))
+
+medianRace <- celerityData_single_patient_per_class %>% filter(!is.na(calcAge)) %>% group_by(Drug.Class, Simple_Race) %>% 
+  summarise(n = n(), median_Age = median(as.numeric(calcAge)))
+
+medianSex <- celerityData_single_patient_per_class %>% filter(!is.na(calcAge)) %>% group_by(Drug.Class, Sex) %>% 
+  summarise(n = n(), median_Age = median(as.numeric(calcAge)))
+
+medianEthnicity <- celerityData_single_patient_per_class %>% filter(!is.na(calcAge)) %>% group_by(Drug.Class, Ethnicity) %>% 
+  summarise(n = n(), median_Age = median(as.numeric(calcAge)))
+
+# Write to workbook
+addWorksheet(wb, "median Ages")
+writeData(wb, "median Ages", medianAll)
+
+addWorksheet(wb, "median Race Ages")
+writeData(wb, "median Race Ages", medianRace)
+
+addWorksheet(wb, "median Sex Ages")
+writeData(wb, "median Sex Ages", medianSex)
+
+addWorksheet(wb, "median Ethnicity Ages")
+writeData(wb, "median Ethnicity Ages", medianEthnicity)
+
+medianAll
+medianRace
+medianSex
+
+# Some ethnicity summaries
+medianEthnicity
+medianEthnicity %>% filter(Ethnicity=="Hispanic or Latino")
+celerityData %>% filter(Ethnicity=="Hispanic or Latino") %>% group_by(Drug.Class) %>% summarise(n = n())
+
+# Sex summary by class
+celerityData_single_patient_per_class %>% group_by(Sex, Drug.Class) %>% summarise(n=n())
+
+# Sex and race by class
+celerityData_single_patient_per_class %>% group_by(Drug.Class, Simple_Race, Sex) %>% summarise(n=n())
+addmargins(table(celerityData_single_patient_per_class$Sex, celerityData_single_patient_per_class$Simple_Race, celerityData_single_patient_per_class$Drug.Class))
+```
+
+
+Find frequency of sex, race, and age groups in the deduplicated data 
+1- Use the table of single patient demographics to get the frequency of the demographic
+```{r sexAgeRaceFreq}
+sex <- freq(celerityData_single_patients_all$Sex)
+sex <- cbind(row.names(sex),as_tibble(sex)) %>% as_tibble()
+
+ages <- freq(celerityData_single_patients_all$Age_Range)
+ages <- cbind(row.names(ages),as_tibble(ages)) %>% as_tibble()
+
+races <- freq(celerityData_single_patients_all$Simple_Race)
+races <- cbind(row.names(races),as_tibble(races)) %>% as_tibble()
+
+ethnicities <- freq(celerityData_single_patients_all$Ethnicity)
+ethnicities <- cbind(row.names(ethnicities),as_tibble(ethnicities)) %>% as_tibble()
+```
+
+Filter for specific drugs and plot the demographics - Use the dataset containing single patients by drug class 
+(may have more than one record across drug classes)
+```{r select3Drugs}
+selectDrugs <- celerityData_single_patient_per_class%>% 
+  filter(Drug.Class %in% c("Heroin", "Cocaine", "Opioid", "Cannabis"),
+         Simple_Race%in%c("Black/African American", "Caucasian", "Other", "Unknown")) %>% 
+  select(Drug.Class, Simple_Race, calcAge, Sex)
+
+# Overall counts
+addWorksheet(wb, "Cocaine, Cannabis, Opioid") # Set up new worksheet
+plot <- ggplot(selectDrugs, aes(x=as.factor(selectDrugs$Drug.Class), fill = selectDrugs$Drug.Class)) + 
+  geom_histogram(stat="count") +
+  ggtitle("Cocaine, Cannabis, and Opioid Case Counts") +
+  xlab("") +
+  ylab("Case Count") +
+  labs(fill = "Drug Class") +
+  scale_fill_manual(values = detroitColors)
+plot
+insertPlot(wb, "Cocaine, Cannabis, Opioid", fileType = "png") # Add the displayed plot to the worksheet
+
+
+plot <- ggplot(selectDrugs, aes(x=as.factor(selectDrugs$Drug.Class), y=as.numeric(selectDrugs$calcAge), fill = selectDrugs$Drug.Class)) + 
+  geom_boxplot() +
+  stat_summary(fun.y=median, geom="point", shape=23, size=8, color="black", fill=detroitColors[7]) +
+  ggtitle("Cocaine, Cannabis, and Opioid Cases by Age (median = yellow diamond)") +
+  xlab("") +
+  ylab("Age in Years") +
+  labs(fill = "Drug Class") +
+  scale_fill_manual(values = detroitColors)
+plot
+writeData(wb, "Cocaine, Cannabis, Opioid", selectDrugs %>% filter(!is.na(calcAge)) %>% group_by(Drug.Class) %>% summarise(`median Age` = median(as.numeric(calcAge))), startCol = 11, startRow = 1)
+insertPlot(wb, "Cocaine, Cannabis, Opioid", fileType = "png", startCol = 11, startRow = 5) # Add the displayed plot to the worksheet
+
+
+# Age distribution by race
+plot <- ggplot(selectDrugs, aes(x=as.factor(selectDrugs$Simple_Race), y=as.numeric(selectDrugs$calcAge), fill = selectDrugs$Drug.Class)) + 
+  geom_boxplot() +
+  ggtitle("Cocaine, Cannabis, and Opioid Cases by Age and Race") +
+  xlab("Race") +
+  ylab("Age in Years") +
+  labs(fill = "Drug Class") +
+  scale_fill_manual(values = detroitColors)
+plot
+  # Make a new subset to get counts by age and median age
+selectDrugs2 <- celerityData_single_patient_per_class%>% 
+  filter(Drug.Class %in% c("Heroin", "Cocaine", "Opioid", "Cannabis"), 
+         Simple_Race%in%c("Black/African American", "Caucasian", "Other", "Unknown"), !is.na(calcAge))%>% 
+  group_by(Drug.Class, Simple_Race) %>% 
+  summarise(n=n(), `median Age` = median(as.numeric(calcAge))) 
+writeData(wb, "Cocaine, Cannabis, Opioid", selectDrugs2 , startRow = 24)
+insertPlot(wb, "Cocaine, Cannabis, Opioid", fileType = "png", startCol = 1, startRow = 30) # Add the displayed plot to the worksheet
+
+# Race counts
+plot <- ggplot(selectDrugs, aes(x=as.factor(selectDrugs$Simple_Race), fill = selectDrugs$Drug.Class)) + 
+  geom_histogram(stat="count") +
+  ggtitle("Cocaine, Cannabis, and Opioid Case Count by Race") +
+  xlab("Race") +
+  ylab("Case Count") +
+  labs(fill = "Drug Class") +
+  scale_fill_manual(values = detroitColors)
+plot
+insertPlot(wb, "Cocaine, Cannabis, Opioid", fileType = "png", startCol = 11, startRow = 25) # Add the displayed plot to the worksheet
+
+# Age distribution by sex and all together
+plot <- ggplot(selectDrugs, aes(x=as.factor(selectDrugs$Sex), y=as.numeric(selectDrugs$calcAge), fill = factor(selectDrugs$Drug.Class))) + 
+  geom_boxplot() +
+  ggtitle("Cocaine, Cannabis, and Opioid Cases by Age and Sex") +
+  xlab("Sex") +
+  ylab("Age in Years") +
+  labs(fill = "Drug Class") +
+  scale_fill_manual(values = detroitColors)
+plot
+insertPlot(wb, "Cocaine, Cannabis, Opioid", fileType = "png", startCol = 1, startRow = 46) # Add the displayed plot to the worksheet
+
+plot <- ggplot(selectDrugs, aes(x=as.factor(selectDrugs$Sex), fill = selectDrugs$Drug.Class)) + 
+  geom_histogram(stat="count") +
+  ggtitle("Cocaine, Cannabis, and Opioid Case Count by Sex") +
+  xlab("Sex") +
+  ylab("Case Count") +
+  labs(fill = "Drug Class") +
+  scale_fill_manual(values = detroitColors)
+plot
+insertPlot(wb, "Cocaine, Cannabis, Opioid", fileType = "png", startCol = 11, startRow = 40) # Add the displayed plot to the worksheet
+
+```
+
+Print the summaries of:
+1- The number drug classes each unique patient was seen for, as well as what these classes were and the number of events in each class by patient
+2- The number of total events for each patient
+```{r}
+addWorksheet(wb, "Events + Demographics")
+writeData(wb, "Events + Demographics", celerityData_single_patients_all, startRow = 1, startCol = 1)
+
+addWorksheet(wb, "Events + Demos Within Classes")
+writeData(wb, "Events + Demos Within Classes", celerityData_single_patient_per_class, startRow = 1, startCol = 1)
+
+```
+
+
+Patient Status & repeats
+```{r patientStatus}
+# Compare events that had no other event rows associated with same patient id, repeat events on same day, and repeat events over time
+addWorksheet(wb, "Repeat Patient + Events")
+writeData(wb, "Repeat Patient + Events", "Compare events that had:\n 1- no other event rows associated with same patient id\n 2- repeat events on same day\n 3- repeat events over time\n (Using Repeated_Patient_Id and Seen_Multiple_Dates)" )
+writeData(wb, "Repeat Patient + Events", celerityData %>% group_by(Repeated_Patient_Id, Seen_Multiple_Dates) %>% summarise(n = n()),
+          startCol = 1, startRow = 3)
+
+# How many repeat patients on only one day?
+a <- celerityData[celerityData$Repeated_Patient_Id==TRUE & celerityData$Seen_Multiple_Dates==FALSE,]
+a2 <- length(unique(a$Patient.Id))
+# How many only one event and one admission date? (in system once)
+b <- celerityData[celerityData$Repeated_Patient_Id==FALSE & celerityData$Seen_Multiple_Dates==FALSE,]
+b2 <- length(unique(b$Patient.Id))
+# How many repeat events and repeat admission dates?
+c <- celerityData[celerityData$Repeated_Patient_Id==TRUE & celerityData$Seen_Multiple_Dates==TRUE,]
+c2 <- length(unique(c$Patient.Id))
+writeData(wb, "Repeat Patient + Events", 
+          paste("There were ", a2, "unique patients seen for multiple events but only one event date. ",
+                "There were ", b2, "unique patients seen on only one admission date for only one poisoning (in system once). ",
+                "There were ", c2, "unique patients seen on multiple admission dates and for multiple events."),
+          startRow = 1)
+
+
+# Overview of unique deceased patients
+addWorksheet(wb, "Deceased Patient + Events")
+uniqueDead <- celerityData %>% filter(Patient.Status == "Died") %>% group_by(Patient.Id) %>% summarise(Event_Count=n())
+writeData(wb, "Deceased Patient + Events", c(paste(dim(uniqueDead)[1], " unique patients were listed as deceased."), paste("Number of events:")))
+writeData(wb, "Deceased Patient + Events", table(uniqueDead$Event_Count), startRow = 2)
+  
+#For deceased patients, how many had multiple events listed?
+writeData(wb, "Deceased Patient + Events", "For deceased patients, how many had multiple events listed? (Uses Repeated_Patient_Id)", startRow = 20)
+writeData(wb, "Deceased Patient + Events", celerityData %>% filter(Patient.Status == "Died") %>% group_by(Patient.Status, Repeated_Patient_Id) %>%
+            summarise(Event_Count = n(), Event_Percent=n()/length(celerityData$Patient.Status[celerityData$Patient.Status=="Died"])*100),
+          startRow = 25)
+
+
+# How many of these events were from patients seen on multiple days before being marked as deceased?
+writeData(wb, "Deceased Patient + Events", "How many of these events were from patients seen on multiple days before being marked as deceased?",
+          startRow = 30)
+writeData(wb, "Deceased Patient + Events", celerityData %>% filter(Patient.Status == "Died") %>%
+            group_by(Patient.Status, Seen_Multiple_Dates) %>% 
+            summarise(Event_Count = n(), Event_Percent=n()/length(celerityData$Patient.Status[celerityData$Patient.Status=="Died"])*100),
+          startRow = 40)
+
+# Patient ids and event counts for unique dead patients
+t <- celerityData %>% filter(Patient.Status == "Died")
+writeData(wb, "Deceased Patient + Events", table(`Seen Multiple Dates`=t$Seen_Multiple_Dates, `Repeated Patient Id`=t$Repeated_Patient_Id), startRow = 30)
+d <- t[t$Seen_Multiple_Dates==TRUE,]
+writeData(wb, "Deceased Patient + Events", celerityData %>% filter(Patient.Status == "Died") %>% 
+            select(Patient.Id, Patient.Status, `Event Count Total`, Seen_Multiple_Dates) %>% group_by(Patient.Id), startRow = 39)
+```
+
+Patients with many events - demographics
+```{r}
+# count of repeated and non-repeated patient ids by age range
+addWorksheet(wb, "Event counts by age range")
+writeData(wb, "Event counts by age range", repeated_events_by_age <- celerityData %>% group_by(Age_Range, `Event Count Total`) %>% summarise())
+repeated_events_by_age 
+
+addWorksheet(wb, "Max event count by age range")
+writeData(wb, "Max event count by age range", celerityData %>% group_by(Age_Range) %>% summarise(`Max Event Count` = max(`Event Count Total`)))
+
+# Number of events by age 
+plot(celerityData_single_patients_all$calcAge,  as.numeric(celerityData_single_patients_all$`Event Count All Classes` ), col  = detroitColors[12], pch = 15, xlab = "Patient Age", ylab = "Number of Events", main = "Number of Events Per Patient, by Patient Age")
+insertPlot(wb, "Event counts by age range", fileType = "png", width = 15, height = 8, startCol = 5) # Add the displayed plot to a worksheet
+
+# what age ranges had more than 10 repeat events for some patients?
+ten <- celerityData_single_patients_all %>% filter(`Event Count All Classes`>10) %>% group_by(Age_Range) %>% summarise(`Number of Unique Patients With >10 Events` = n())
+writeData(wb, "Max event count by age range", "What age ranges had more than 10 repeat events for some patients?", startRow = 19)
+writeData(wb, "Max event count by age range", ten, startRow = 20)
+
+
+# Number of events by Race and Drug
+addWorksheet(wb, "Event Count - Race and Drug")
+plot <- ggplot(celerityData_single_patient_per_class[celerityData_single_patient_per_class$Simple_Race!="Unknown"&!is.na(celerityData_single_patient_per_class$Simple_Race),], aes(x=as.factor(Simple_Race), y = `Event Count Within Class`, fill = Drug.Class)) + 
+  geom_boxplot() +
+  ggtitle("Number of Events Per Patient by Race") +
+  xlab("Race") +
+  ylab("Event Count") +
+  labs(fill = "Drug Class") +
+  scale_fill_manual(values = detroitColors[c(3:6,8:12)]) +
+  scale_y_log10()
+plot
+insertPlot(wb, "Event Count - Race and Drug", fileType = "png", width = 15, height = 10) # Add the displayed plot to a worksheet
+
+# See drug classes for patients with more than one event
+table(celerityData_single_patient_per_class$Drug.Class[celerityData_single_patient_per_class$`Event Count Within Class`>1])
+```
+
+Patients with multiple admission days - demographics
+```{r}
+# get the count of unique admission dates per patient
+Date_Count <- celerityData %>% group_by(Patient.Id, Admission.Date) %>% summarise(Events_This_Day = length(unique(Event.Id)))
+# filter for patients with more than one admission date
+patients_multiple_dates_ID <- Date_Count %>% filter(Events_This_Day>1)
+# Select demographic info for these patients
+patients_multiple_dates <- celerityData_single_patients_all %>% filter(Patient.Id %in% patients_multiple_dates_ID$Patient.Id)
+
+# Make tables
+patients_multiple_dates  %>% group_by(Sex) %>% summarise(n =n())
+patients_multiple_dates  %>% group_by(Simple_Race) %>% summarise(n =n())
+patients_multiple_dates  %>% group_by(Ethnicity) %>% summarise(n =n())
+patients_multiple_dates  %>% group_by(Age_Range) %>% summarise(n =n())
+
+# See the drug classes involved with multi-day patients
+patients_multiple_dates2 <- celerityData_single_patient_per_class %>% filter(Patient.Id %in% patients_multiple_dates_ID$Patient.Id) 
+patients_multiple_dates2 %>% group_by(Drug.Class) %>% 
+  summarise(n =n(), percent = round(n()/dim(patients_multiple_dates2)[1]*100, digits = 0))
+
+# How many unique admission dates were eacn patient seen on?
+Dates_per_patient <- celerityData %>% group_by(Patient.Id) %>% summarise(Days_Admitted = length(unique(Admission.Date)))
+Dates_per_patient %>% group_by(Days_Admitted) %>% summarise(n=n())
+```
+
+
+
+Patients with multiple events per visit ID (polysubstance) - demographics
+```{r}
+# get the count of unique events per visit id on a given admission date
+Event_Count <- celerityData %>% group_by(Patient.Id, Visit.Id) %>% summarise(Events_This_Visit= length(unique(Event.Id)))
+table(Event_Count$Events_This_Visit)
+# Filter for patients with more than 1 event per visit
+patients_multiple_events_ID <- Event_Count %>% filter(Events_This_Visit>1)
+# Select demographic info for these patients
+patients_multiple_events <- celerityData_single_patients_all %>% filter(Patient.Id %in% patients_multiple_events_ID$Patient.Id)
+
+# Make tables
+patients_multiple_events  %>% group_by(Sex) %>% summarise(n =n())
+patients_multiple_events  %>% group_by(Simple_Race) %>% summarise(n =n())
+patients_multiple_events  %>% group_by(Ethnicity) %>% summarise(n =n())
+patients_multiple_events  %>% group_by(Age_Range) %>% summarise(n =n())
+
+# See the drug classes involved with same day events for a patient
+patients_multiple_events2 <- celerityData_single_patient_per_class %>% filter(Patient.Id %in% patients_multiple_events_ID$Patient.Id) 
+patients_multiple_events2 %>% group_by(Drug.Class) %>% 
+  summarise(n =n(), percent = round(n()/dim(patients_multiple_events2)[1]*100, digits = 0))
+```
+
+Find information about the repeated patient ids, including looking into the top cases
+```{r topPatients}
+repeats <- celerityData %>% select(Patient.Id, `Event Count Total`) %>% arrange(desc(`Event Count Total`))
+# Add a dummy column to use as a factor for plotting
+repeats_clean <- data.frame(repeats[,c("Patient.Id", "Event Count Total")], rep("Patient", length(repeats$Patient.Id)))
+colnames(repeats_clean) <- c("Id", "Events", "Patient") 
+
+# Plot the distribution of number of visits per patient by box plot and histogram
+addWorksheet(wb, "Plot visits per patient")
+plot(x = as.factor(repeats_clean$Patient), y = as.numeric(repeats_clean$Events), col = "#e7cea2", xlab = "", ylab = "Number of events per patient")
+insertPlot(wb, "Plot visits per patient", fileType = "png", width = 10, height = 6) # Add the displayed plot to a worksheet
+hist(repeats_clean$Events, col = "#e7cea2", xlab = "Number of events per patient", main = "Distribution of event count per patient")
+insertPlot(wb, "Plot visits per patient", fileType = "png", width = 10, height = 6, startCol = 17) 
+
+# Find information about the patient with the most events
+addWorksheet(wb, "Top repeat patients")
+Top_id <- celerityData_single_patients_all$Patient.Id[celerityData_single_patients_all$`Event Count All Classes` == max(celerityData_single_patients_all$`Event Count All Classes`)] # Pull top id with most events
+Top_id_events <- celerityData %>% filter(Patient.Id==unique(Top_id))
+
+    # What facilities did they visit?
+writeData(wb, "Top repeat patients", "---------The patient with the most total events was seen at the following locations:")
+writeData(wb, "Top repeat patients", table(Top_id_events$Simple_Facility_Name), startRow = 2)
+    # What age, sex, race were they? Are they dead?
+writeData(wb, "Top repeat patients", paste("\nThis patient was in the age range", as.character(unique(Top_id_events$Age_Range)), ", and was a", unique(Top_id_events$Simple_Race), unique(Top_id_events$Sex), "whose status is", unique(Top_id_events$Patient.Status), collapse = ""), startRow = 6)
+  # How many admission dates for this patient?
+writeData(wb, "Top repeat patients", paste("\n\nThis patient was seen on", length(unique(Top_id_events$Admission.Date)), "separate days.", collapse = ""), startRow = 7)
+  # What ICD codes?
+writeData(wb, "Top repeat patients", paste("\n\nThis patient was seen for the following ICD codes:\n", unique(Top_id_events$`ICD-10-CM.Code`), collapse = ""), startRow = 8)
+    # What drug classes and types were involved?
+writeData(wb, "Top repeat patients", "\n\nThis patient was seen for the following poisonings:", startRow = 9)
+writeData(wb, "Top repeat patients", table(Top_id_events$Drug.Class, Top_id_events$Drug.Type), startRow = 10)
+
+# -------------------
+
+# Find information about the patient with the most events
+Top_id2 <- celerityData_single_patient_per_class$Patient.Id[celerityData_single_patient_per_class$`Event Count Within Class` == max(celerityData_single_patient_per_class$`Event Count Within Class`)] # Pull top id with most events
+Top_id_events2 <- celerityData %>% filter(Patient.Id==unique(Top_id2))
+
+    # What facilities did they visit?
+writeData(wb, "Top repeat patients", "---------The patient with the most events in one class was seen at the following locations:", startRow = 18)
+writeData(wb, "Top repeat patients", table(Top_id_events2$Simple_Facility_Name), startRow = 19)
+    # What age, sex, race were they? Are they dead?
+writeData(wb, "Top repeat patients", paste("\nThis patient was in the age range", as.character(unique(Top_id_events2$Age_Range)), ", and was a", unique(Top_id_events2$Simple_Race), unique(Top_id_events2$Sex), "whose status is", unique(Top_id_events2$Patient.Status), collapse = ""), startRow = 23)
+  # How many admission dates for this patient?
+writeData(wb, "Top repeat patients", paste("\n\nThis patient was seen on", length(unique(Top_id_events2$Admission.Date)), "separate days.", collapse = "") , startRow = 27)
+  # What ICD codes?
+writeData(wb, "Top repeat patients", paste("\n\nThis patient was seen for the following ICD codes:\n", unique(Top_id_events2$`ICD-10-CM.Code`), collapse = ""), startRow = 28)
+  # What drug classes and types were involved?
+writeData(wb, "Top repeat patients", "\n\nThis patient was seen for the following poisonings:", startRow = 29)
+writeData(wb, "Top repeat patients", table(Top_id_events2$Drug.Class, Top_id_events2$Drug.Type), startRow = 35)
+
+
+
+```
+
+
+For patients with more than one drug class or more than one event in a drug class
+```{r}
+# Number of repeat events plotted by drug class
+addWorksheet(wb, "Repeat events within + bw class")
+plot(as.factor(celerityData_single_patient_per_class$Drug.Class), celerityData_single_patient_per_class$`Event Count Within Class`, col = detroitColors[c(3:6,8:12)], xlab = "Drug Class", ylab = "Number of events per patient", main = "Number of Events Per Patient in a Specific Drug Class, by Drug Class", cex.axis = 0.5)
+insertPlot(wb, "Repeat events within + bw class", fileType = "png", width = 10, height = 6) # Add the displayed plot to a worksheet
+
+writeData(wb, "Repeat events within + bw class", 
+celerityData_single_patient_per_class %>% group_by(Drug.Class) %>% summarise(`mean events per patient within class` = mean(`Event Count Within Class`)),
+startCol = 20)
+
+# histograms of the frequency with which unique patients were seen for multiple drug classes
+# for each drug class, how often were the affected patients also being seen for other drug classes?
+numDrugClasses <- celerityData_single_patient_per_class %>% select(Drug.Class, Number_of_drug_classes_per_patient)
+classColors <- detroitColors[c(3:6,8:12)]
+n <- 1
+for(DC in unique(numDrugClasses$Drug.Class)){
+  dat <- numDrugClasses[numDrugClasses$Drug.Class==DC,]
+  plot <- hist(dat$Number_of_drug_classes_per_patient, col = classColors[n],
+               main = paste("Distribution for frequency of separate drug classes per each unique", DC, "patient"),
+               cex.main = 0.6,
+               xlab = "Number of unique drug classes per individual")
+  print(plot)
+  insertPlot(wb, "Repeat events within + bw class", fileType = "png", width = 10, height = 6, startRow = n*35) # Add the displayed plot to a worksheet
+  n <- n+1
+}
+```
+
+
+Neonatal/infant vs fetal poisoning
+Was the patient a pregnant mother or an infant?
+What drugs were involved?
+```{r}
+addWorksheet(wb, "Neonatal + fetal summary")
+writeData(wb, "Neonatal + fetal summary", "For neonatal & fetal patients, what ICD codes were reported?")
+writeData(wb, "Neonatal + fetal summary", neonatal %>% group_by(`ICD-10-CM.Code`) %>% summarise(`Number of Events` = n()), startRow = 3)
+
+addWorksheet(wb, "Neonatal + fetal full")
+writeData(wb, "Neonatal + fetal full", neonatal)
+table(neonatal$Diagnosis.Description)
+```
+
+
+
+Facilities utilized
+```{r}
+# Group the facilities and count the number of events, show in descending order
+addWorksheet(wb, "Facilities")
+writeData(wb, "Facilities", facilities <- celerityData %>% group_by(Simple_Facility_Name) %>% summarise(n=n()) %>% arrange(desc(n)))
+
+# Print the top 10 facilities
+head(facilities, n=10)
+```
+
+EPI CURVES - not printed to file, for review in code only
+Since the full roster of reporting facilities was not available prior to February 2020, and the data is not considered complete until after March 2020:
+ALL TIME PERIOD COUNT COMPARISONS SHOULD NOT BEGIN PRIOR TO MARCH 2020
+```{r}
+# Subset for complete data only
+fullONLY <- celerityData %>% filter (anydate(Admission.Date) >= anydate("2020-03-01") )
+
+dat <- data.frame(fullONLY$Sex, fullONLY$Admission.Date, fullONLY$Drug.Class)
+colnames(dat) <- c("Sex", "Admission_Date", "Drug.Class") 
+dat <- dat %>% filter(Sex %in% c("Male", "Female"))
+
+# By month
+dat2 <- dat %>% mutate(Admission_Month = paste0(month(Admission_Date, label=TRUE), "_", year(Admission_Date)), ) # Make month variable
+levels(dat2$Admission_Month) <- c("Mar_2020", "Apr_2020", "May_2020", "Jun_2020", "Jul_2020", "Aug_2020", "Sep_2020", "Oct_2020", "Nov_2020", "Dec_2020", "Jan_2021", "Feb_2021") # Set the levels so months display in order
+
+## Month buckets since March only
+ggplot(data = dat2[dat2$Drug.Class!="Other"&dat2$Drug.Class!="Unspecified",], aes(x = Admission_Month)) +
+geom_bar( fill = detroitColors[5], size = 0.1) +
+scale_x_discrete(limits = levels(dat2$Admission_Month), name = "Month of admission") +
+scale_y_continuous(limits = c(0, 200), name = "Number of events") +
+theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+## Month buckets by drug class
+ggplot(data = dat2[dat2$Drug.Class!="Other"&dat2$Drug.Class!="Unspecified",], aes(x = Admission_Month)) +
+geom_bar( fill = detroitColors[5], size = 0.1) +
+scale_x_discrete(limits = levels(dat2$Admission_Month), name = "Month of admission") +
+scale_y_continuous(limits = c(0, 200), name = "Number of events") +
+theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+facet_grid( ~ Drug.Class)
+# ----------------------------------------
+
+## Month buckets to compare past months and check completeness of data
+
+# Use the levels to order the x axis using scale_x_discrete
+ggplot(data = dat2, aes(x = Admission_Month)) +
+geom_bar( fill = detroitColors[5], size = 0.1) +
+scale_x_discrete(limits = levels(dat2$Admission_Month), name = "Month of admission") +
+scale_y_continuous(limits = c(0, 200), name = "Number of events") +
+theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+facet_grid( ~ Sex)
+```
+
+Accidental poisonings?
+```{r}
+addWorksheet(wb, "Accidentals")
+# How many and what percentage of total were accidental?
+writeData(wb, "Accidentals", "How many and what percentage of total were accidental?")
+writeData(wb, "Accidentals", (celerityData %>% group_by(Accidental) %>% summarise(Count = n(), Percentage_Events = n()/dim(celerityData)[1]*100)), startRow = 3)
+
+addWorksheet(wb, "Accidentals by age")
+# By Age range?
+writeData(wb, "Accidentals by age", (celerityData %>% group_by(Accidental, Age_Range) %>% filter(Accidental=="Y") %>% summarise(Count = n(), Percentage_Events = n()/dim(celerityData)[1]*100)))
+
+addWorksheet(wb, "Accidentals by class")
+# What drug classes had accidental poisonings?
+writeData(wb, "Accidentals by class", (celerityData %>% group_by(Accidental, Drug.Class) %>% filter(Accidental=="Y")) %>% summarise(Count = n()))
+
+```
+
+
+***************************
+         PRINT
+***************************
+
+Save cleaned file to results
+```{r}
+# Save the workbook with all result pages from above
+saveWorkbook(wb, file = paste0(outLocation, "/", Sys.Date(), "_MiCelerity Analysis Results.xlsx"), overwrite = TRUE)
+
+for(i in c("All", "First admission dates", "Subsequent admission dates", "Single patient within class", "Single patient over all")){addWorksheet(wb_Full, i)}
+writeData(wb_Full,"All", celerityData)
+writeData(wb_Full, "First admission dates", celerityData_firstAdmission)
+writeData(wb_Full, "Subsequent admission dates", celerityData_subsequent_admissions)
+writeData(wb_Full, "Single patient within class", celerityData_single_patient_per_class)
+writeData(wb_Full, "Single patient over all", celerityData_single_patients_all)
+saveWorkbook(wb_Full, file = paste0(outLocation, "/", Sys.Date(), "_Cleaned_MiCelerity_datasets.xlsx"), overwrite = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
