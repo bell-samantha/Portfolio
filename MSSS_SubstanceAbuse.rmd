@@ -1,0 +1,755 @@
+---
+title: "MSSS_SubstanceAbuse"
+author: "Samantha L Bell"
+date: "11/17/2020"
+output:
+  html_notebook:
+    fig_width: 12
+    fig_height: 9
+    fig_caption: yes
+  pdf_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+
+____________________________________________________________________________________
+What does this script need?
+____________________________________________________________________________________
+
+This script takes in:
+1- MSSS export from the epiplot page for Detroit City
+
+__________________________________________________________________________________
+INSTRUCTIONS
+____________________________________________________________________________________
+1- Fill in required necessary information in fields that look like this: 
+# ************************************************************************************#
+#      Text Here
+#
+# ************************************************************************************#
+2- Then click the green run button for that block of code
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(openxlsx)
+library(anytime)
+library(writexl)
+library(TeachingDemos)
+library(stringr)
+library(lubridate)
+```
+
+
+## Enter location where files are located and new files will be saved
+```{r location}
+### TYPE THE PATH BETWEEN THE "". SLASHES MUST FACE THIS DIRECTION: / ###
+# ************************************************************************************#
+inputLocation <- "//codasfswvp30/health$/bells/Desktop/R Workspace/MSSS/" #only holds the input files
+
+outputLocation <- "S:/Health/Epidemiology/Data/MSSS/2020_Substance_Abuse/"
+
+# ************************************************************************************#
+```
+
+Load the data from multiple files
+simplify the admission date (remove the time)
+make a time of day variable by splitting the time after midnight to noon, or after noon to midnight
+```{r loadData **12/2020 Samantha Lynn Bell, DHD**}
+setwd(inputLocation)
+Input_data <- list.files(path = inputLocation, pattern = "*.csv") %>% 
+    map_df(~read_csv(., na = c('NA', '#N/A', ''), col_types = cols(.default = col_character()) )) 
+
+memory.limit(size=50000)
+# Remove any duplicate rows 
+Full_data <- Input_data[!duplicated(Input_data),]
+
+# Mutate the admission date, time, and time of day 
+Full_data <- Full_data %>% mutate(
+  AdmissionDate = anydate(Admitted),
+  Time = str_extract(Admitted,"\\d\\d:\\d\\d:\\d\\d"))%>% mutate(
+      Month = paste0(month(AdmissionDate, label = TRUE), "_", year(AdmissionDate)),
+      Time_of_Day = case_when(Time <= "12:00:00" & Time > "00:00:00" ~ "Morning",
+                              Time <= "24:00:00" & Time > "12:00:00" ~ "Evening"))
+```
+
+Make a variable for only Detroit Zip codes
+Non-Detroit zips are marked "NA"
+```{r filterZips **12/2020 Samantha Lynn Bell, DHD**}
+detroitZips <- c("48201", "48202", "48203", "48204", "48205", "48206", "48207", "48208", "48209", "48210", "48211", "48212", "48213", "48214", "48215", "48216", "48217", "48219", "48221", "48223", "48224", "48226", "48227", "48228", "48233", "48234", "48235", "48236", "48238", "48239", "48243")
+
+Full_data <- Full_data %>% mutate(
+  Detroit_Zip = case_when(`Reported Zip` %in% detroitZips ~ `Reported Zip`, 
+                          TRUE ~ "NA")
+)
+```
+
+
+Define all ages in years and set the age groups to match those used in MI state reporting
+```{r parseAge **12/2020 Samantha Lynn Bell, DHD**}
+
+Full_data$`Calculated Age` <- as.numeric(Full_data$`Calculated Age`)
+
+Full_data <- Full_data %>%
+  mutate(
+      Age_In_Years = case_when( # if age is in months, convert to years in new column
+      `Age Units` == "Mo" | `Age Units` == "mo" ~ round(`Calculated Age`/12, digits = 2),
+      `Age Units` == "a" | `Age Units` == "a" ~ `Calculated Age`,
+      TRUE ~ `Calculated Age` # Otherwise keep the age (in years already)
+    ),
+    Age_Range = factor(case_when( # Make age range categories
+      Age_In_Years < 1                       ~ 1,
+      Age_In_Years >=1  & Age_In_Years<=10   ~ 2,  # cannot use range 1:9 due to decimals
+      Age_In_Years >=11 & Age_In_Years<15    ~ 3,
+      Age_In_Years >=15 & Age_In_Years<25    ~ 4,
+      Age_In_Years >=25 & Age_In_Years<35    ~ 5,
+      Age_In_Years >=35 & Age_In_Years<45    ~ 6,
+      Age_In_Years >=45 & Age_In_Years<55    ~ 7,
+      Age_In_Years >=55 & Age_In_Years<65    ~ 8,
+      Age_In_Years >=65 & Age_In_Years<75    ~ 9,
+      Age_In_Years >=75 & Age_In_Years<85    ~ 10,
+      Age_In_Years >=85 ~ 11), 
+      levels = c(1,2,3,4,5,6,7,8,9,10,11), 
+      labels = c("Less_than_1", "1_10", "11_14", "15-24", "25-34", "35-44", "45-54", "55-64", "65-74", "75-84", "85+")
+  ))
+# Check for missed age ranges - what was the provided calculated age?
+Full_data$`Calculated Age`[is.na(Full_data$Age_Range)]
+```
+
+Alcohol subset
+  Pulling from full data
+  Alcohol related disorders are labeled with ICD codes that begin "F10"
+```{r alcohol **12/2020 Samantha Lynn Bell, DHD**}
+Full_data <- Full_data %>% mutate(
+  alcohol_ICD = case_when(
+    grepl("F10.", Diagnosis)~"Y", 
+    TRUE ~ "UNK")
+  )
+alcoholData <- Full_data %>% filter(alcohol_ICD=="Y")
+Alcohol_by_Date_ICD <- alcoholData %>% group_by(Month, AdmissionDate) %>% summarise(`Number of Alcohol Incidents (ICD code only)` = n())
+# Print the mean number of alcohol-related disorders per admission date
+mean(Alcohol_by_Date_ICD$`Number of Alcohol Incidents (ICD code only)`)
+
+# Print the mean number of alcohol-related disorders per admission date in 2020
+mean(Alcohol_by_Date_ICD$`Number of Alcohol Incidents (ICD code only)`[Alcohol_by_Date_ICD$AdmissionDate>anydate("2020-01-01")])
+```
+
+Vape-related Disorder subset
+  - Pull from full data 
+  - This ICD code was released in October 2020 and should not be used to compare with data prior to that time
+```{r vape **12/2020 Samantha Lynn Bell, DHD**}
+Full_data <- Full_data %>% mutate(
+  vape_ICD = case_when(
+    grepl("U07.0", Diagnosis) ~ "Y",
+    TRUE ~ "UNK"), 
+  vape_Text = case_when(
+    grepl("vape|vaping", paste(Diagnosis, `Encounter Reason`, `Initial Complaint`, `Clinical Impression`)) ~ "Y",
+          TRUE ~ "NA")
+)
+vapeData <- Full_data %>% filter(vape_ICD == "Y"|vape_Text == "Y")
+```
+
+
+#Subset data for potential substance abuse related events
+BASED ON:
+o	Use pattern matching in the `Current Complaint`, `Initial Complaint` or `Encounter Reason` fields
+o	Use pattern matching to look for ICD-10 codes T36-T50 within the Diagnosis field. 
+  - T36-T50: Poisoning by drugs, medicaments and biological substances
+o	Use pattern matching to look for ICD-9 codes 960-979 within the Diagnosis field 
+o	Subset the data to select for rows matching either step 1 or 2 or 3
+
+
+```{r subsetSubstanceAbuse **12/2020 Samantha Lynn Bell, DHD**}
+# Find row numbers for current complaints possibly related to substance abuse
+pat <- "alcohol|intoxicat|overdose|narcan|naloxone|non.responsive|opioid|opoid|cocaine|cocane|cociane|heroin|herione|cannabis|marijuana|mary jane|drug use|substance abuse|withdrawl|detox|methadon|opium|narcotic|\\^OD\\^|[oa](p)?[pv][er][er]( )?do[se](e)? |[oa](p)?[pv][er][er]( )?do(s)?(e)? |[oa](p)?[pv][er][er]( )?o[se][se] |to(o)? much drug|to(o)? many drug(s)?|p[oi][io]s(o)?(n)?|nar[ck]an|naloxo(ne)?|syncop[ye]|intoxic(ation)?|extra( )?dose|sobredosis|loss of consc| loc |unresponsive|altered mental state| ams |\\^OD|OD\\^|opi[oa](i)?[tde]([es])?([es])?|me[ty](t)?(h)?[oae](r)?d[oie]|suboxo|bu[pr][pr][eao]no|bupren|Abstral|Actiq|Astramorph|AVINza|Beforal|Belbuca|Bunavail|Butorphanol|Butrans|Cizdol|Cod[ei]([ei])?n(e)?|Conzip|darvo|dazidox|Demerol|d[iea]l([auo])?([auo])?d[eai]d|dolophine|dur[ao]ge|Duramorph|eth([[:punct:]])?oxydose|Exalgo|fent|Fortral|Fortwin|Haldid|Hycodan|Hydromor|Infumorph|Instanyl|Kadian|Levo([[:punct:]])?Dromoran|Levorphanol|Lorcet|Lortab|Matrifen|Meperi|Moradol|morph[ia]|MSContin|MSIR|Nalbuphine|norspan|nubain|Numorphan|Onsolis|opana|Oramorph|oxaydo|oxy[cmd]o|oxyfast|oxyIR|Palladone|Pentazocine|perco|Propoxyphene|Roxano|Rybix|sevredol|Sosegon|Stadol|Sublimaze|Suboxone|subsys|Subutex|Talwin|temgesic|ultram|zytram|transtec|tylox|vico|Zubsolv|ultra[sc]et| roxi|zohydro|codone| norco|cocaine|cocane|cociane|COC(C)?A(A)?(I)?N(E)?|COKE|BLOW|CRA[CK]([CK])?|stimulant|ecstacy|esctacy|ampheta|methylphenidate|psychostimula|caffeine|caffeine|AMPHETA|AD(D)?[EA]R[EA]L|CONCERTA|RITALIN|FOCALIN|VYVANSE|METH|POSS OD"
+fields_to_search <- paste(Full_data$`Current Complaint`, Full_data$`Initial Complaint`,Full_data$`Encounter Reason`) #saves time to make these ahead
+matched_current_complaints <- grepl(pat, fields_to_search, ignore.case = TRUE)
+
+# Row numbers for ICD diagnosis codes for "Poisoning by, adverse effect of and underdosing of drugs, medicaments and biological substances" (large bucket for initial subsetting of data)
+pat2 <- paste0("T", paste(paste(36:50), collapse = "|T")) # End up with T36 - T50 codes
+matched_ICD_10_codes <- grepl(pat2, Full_data$Diagnosis, ignore.case = TRUE) 
+
+# Check for all ICD-9 codes being in the dataset (ICD-10 started 2016, but ICD-9 may be in later years also?)
+all_matched_ICD_9 <- grepl("\n\\d{3}\\.\\d|^\\d{3}\\.\\d|\\W\\d{3}\\.\\d", Full_data$Diagnosis)
+table(year(Full_data$AdmissionDate[which(all_matched_ICD_9)]))
+
+# ICD-9 codes for poisonings
+pat3 <- paste0("\n", paste(paste(960:979), collapse="|\n"), "|^", paste(paste(960:979), collapse="|^"), "|\\W", paste(paste(960:979), collapse="|\\W"))
+matched_ICD_9_codes <- grepl(pat3, Full_data$Diagnosis, ignore.case = TRUE) 
+icd9 <- Full_data[which(matched_ICD_9_codes),]
+table(year(icd9$AdmissionDate))
+
+# Select the matched rows (matched either text, ICD-9, or ICD-10 codes) by first making a combined TRUE FALSE vector 
+rows <- ""
+for(i in 1:dim(Full_data)[1]){
+  if(matched_current_complaints[i]==TRUE|matched_ICD_10_codes[i]==TRUE|matched_ICD_9_codes[i]==TRUE){
+    rows[i] <- TRUE
+  }
+}
+# Use the TRUE/FALSE vector to subset for substance abuse data
+substanceAbuseData <- Full_data[which(rows==TRUE),]
+
+# See how many records are flagged using each method
+ftable(matched_current_complaints, matched_ICD_10_codes, matched_ICD_9_codes)
+```
+
+
+Caffeine subset
+  Caffeine overdose diagnoses will show in the Stimulant category, so we should review the impact that caffeine-alone cases might have on these stimulant numbers
+  ICD-10 code T43.61:Poisoning by caffeine
+  ICD-9 code 969.71: Poisoning by caffeine
+```{r caffeineCheck **12/2020 Samantha Lynn Bell, DHD**}
+# Caffeine
+caffeineRows <- grep("T43.61|969.71", substanceAbuseData$Diagnosis)
+Caffeine <- substanceAbuseData[caffeineRows,]
+```
+
+Fentanyl poisoning subset
+  - Pull from the substance abuse data subset (to exclude any text matches that are not substance abuse related)
+  - Look by ICD code or by text match
+  - This ICD code was released in October 2020 and should not be used to compare with data prior to that time
+```{r fentanyl **12/2020 Samantha Lynn Bell, DHD**}
+substanceAbuseData <- substanceAbuseData %>% mutate(
+  fentanyl_ICD = case_when(
+    grepl("T40.41", Diagnosis) ~ "Y",
+    TRUE ~ "UNK"),
+  fentanyl_Text = case_when(
+    grepl("fentanyl", paste(Diagnosis, `Encounter Reason`, `Initial Complaint`, `Clinical Impression`), ignore.case = TRUE) ~ "Y",
+    TRUE ~ "UNK")
+)
+fentanylData <- substanceAbuseData %>% filter(fentanyl_ICD == "Y" | fentanyl_Text == "Y")
+```
+
+
+#All overdoses
+BASED ON:
+o	Use pattern matching in the `Current Complaint`, `Initial Complaint` or `Encounter Reason` fields
+o	Use pattern matching to look for ICD-10 or ICD-9 codes (see list below) within the Diagnosis field 
+o	Subset the data to select for rows matching either step 1 or 2
+
+ICD-10
+  o  Any Mention of Diagnosis T36-T50: Poisoning by drugs, medicaments and
+     biological substances
+  AND 
+  o For T36.9, T37.9, T39.9, T41.4, T42.7, T43.9, T45.9, T47.9, and T49.9, a 5th character; for all others, a 6th character
+    1: Accidental (unintentional)
+    2: Intentional self-harm
+    3: Assault
+    4: Undetermined intent
+  Does not include:
+    5: Adverse effect
+    6: Underdosing
+    
+ICD-9
+  o  Search for:
+  965 Poisoning by opiates and related narcotics
+  967 Poisoning by sedatives and hypnotics
+  969 Poisoning by psychotropic agents
+  970 Poisoning by central nervous system stimulants
+
+```{r subsetOverdoses **12/2020 Samantha Lynn Bell, DHD**}
+# All overdoses
+## make patterns for each piece of the logic
+overdose_icd9_pat_all <- "(\n|^|\\W)(965|967|969|970)"
+overdose_pat_all <- "T36\\.9|T37\\.9|T39\\.9|T41\\.4|T42\\.7|T43\\.9|T45\\.9|T47\\.9|T49\\.9"
+fifth_char_pat_all <- "T..\\.9(1|2|3|4)"
+exclude_5th_pat_all <- "T..\\.9(5|6)"
+sixth_char_pat_all <- "T..\\.9.(1|2|3|4)" 
+exclude_6th_pat_all <- "T..\\.9.(5|6)"
+overdose_text_pat_all <- "overdose|narcan|naloxone|\\^OD\\^|\\^OD|OD\\^|[oa](p)?[pv][er][er]( )?do[se](e)?|[oa](p)?[pv][er][er]( )?dos(e)?|[oa](p)?[pv][er][er]( )?o[se][se]|to(o)? much drug|to(o)? many drug(s)?|sobredosis|nar[ck]an|naloxo(ne)?|POSS OD"
+
+# Start with the substance abuse subset because it already contains all matches to the above patterns 
+#   No overdoses are missing from substanceAbuseData that would be in Full_data
+#   Using substanceAbuseData to subset will save processing time (smaller than Full_data)
+substanceAbuseData <- substanceAbuseData %>% mutate(
+  Overdose_ICD_All = case_when(
+    ( grepl(pat2, Diagnosis) & grepl(overdose_pat_all, Diagnosis) & grepl(fifth_char_pat_all, Diagnosis) & !grepl(exclude_5th_pat_all, Diagnosis) ) |
+      ( grepl(pat2, Diagnosis) & !grepl(overdose_pat_all, Diagnosis) & grepl(sixth_char_pat_all, Diagnosis) & !grepl(exclude_5th_pat_all, Diagnosis) ) |
+      grepl(overdose_icd9_pat_all, Diagnosis) ~ "Y", 
+    TRUE ~ "N"),
+  Overdose_Text_All = case_when(
+    grepl(overdose_text_pat_all, paste(`Current Complaint`, `Initial Complaint`, `Encounter Reason`), ignore.case = TRUE) ~ "Y",
+    TRUE ~ "N")
+  ) %>% mutate(Overdose_complete_All = case_when( # Relies on the variables created before the 2nd mutate
+  Overdose_ICD_All == "Y" |  Overdose_Text_All == "Y" ~ "Y",
+  TRUE ~ "N")
+)
+
+## See how many cases are caught by each method:
+ftable(ICD = substanceAbuseData$Overdose_ICD_All, Text = substanceAbuseData$Overdose_Text_All, Complete = substanceAbuseData$Overdose_complete_All)
+cat("Total Flagged:", dim(substanceAbuseData[substanceAbuseData$Overdose_ICD_All=="Y"|substanceAbuseData$Overdose_Text_All=="Y"|substanceAbuseData$Overdose_complete_All=="Y",])[1])
+
+## Make overdose subset 
+overdoseData <- substanceAbuseData %>% filter(Overdose_ICD_All=="Y"|Overdose_complete_All=="Y"|Overdose_Text_All=="Y")
+```
+
+Subset for overdose records with patients less than 1 year of age or ICD-10 P04.3, P04.4, P04.13, P04.14, P04.16, P04.17, P96, Q86
+```{r neonatal  **12/2020 Samantha Lynn Bell, DHD**}
+neonatal <- overdoseData %>% filter(Age_Range == "Less_than_1" | grepl("(P04\\.[3|4|13|14|16|17])|P96|Q86", Diagnosis))
+```
+
+
+Subset further for specific types of overdoses
+  These all rely first on the overdoseData subset, and so are already determined to be overdoses (general). 
+  ***
+  3 Types of flag:
+   1- ICD codes only
+   2- Text match only
+   3- Either ICD or Text 
+  
+  ** The ICD codes included are ONLY regarding poisonings/overdoses - not all codes with mention of the drug
+  
+# Opiod - flagged separately for:
+  o Opioid specific ICD codes --
+  T40.0X: Poisoning by opium, T40.1X: Poisoning by heroin, T40.2X: Poisoning by other opioids, T40.3X: Poisoning by methadone, 
+  T40.4X: Poisoning by synthetic narcotics, T40.60: Poisoning by unspecified narcotics, T40.69: Poisoning by other narcotics, or ICD-9 code 965: Poisoning by opiates and related narcotics
+  o Opioid text OR ICD codes (more robust)
+
+# Heroin - flagged separately for:
+  o Heroin specific ICD-10 codes -- T40.1X: Poisoning by heroin or ICD-9 code 965.01 Poisoning by heroin or ICD-9 965.01: Poisoning by heroin
+  o Heroin text OR ICD codes (more robust)
+  
+# Stimulants - flagged separately for:
+  o Stimulant specific ICD codes -- 
+  T40.5X: Poisoning by cocaine, T43.60: Poisoning by unspecified psychostimulants, T43.61: Poisoning by caffeine, T43.62: Poisoning by amphetamines,
+  T43.63: Poisoning by methylphenidate, T43.64: Poisoning by ecstasy, T43.69: Poisoning by other psychostimulants, or ICD-9 code 970: Poisoning by central nervous system stimulant
+  o Stimulant text OR ICD codes (more robust)  
+  
+# Cocaine - flagged separately for:
+  o Cocaine specific ICD codes -- T40.5X: Poisoning by cocaine or ICD-9 code 970.81: Poisoning by cocaine
+  o Cocaine text OR ICD codes (more robust)
+
+# Cannabis - flagged separately for:
+  o Cannabis specific ICD codes -- T40.7X Poisoning by cannabis (derivatives)
+  o Cannabis text OR ICD codes (more robust)
+```{r overdoseTypes **12/2020 Samantha Lynn Bell, DHD**}
+# Opioid overdoses
+opioid_ICD_9_pattern <- "(\n|^|\\W)(965)"
+opioid_ICD_10_pattern <- "T40.0X|T40.1X|T40.2X|T40.3X|T40.4X|T40.60|T40.69"
+opioid_text_pattern <- "opioid|opoid|heroin|herione|methadon|opium|narcotic|opi[oa](i)?[tde]([es])?([es])?|me[ty](t)?(h)?[oae](r)?d[oie]|bupren|Abstral|Actiq|Astramorph|AVINza|Beforal|Belbuca|Bunavail|Butorphanol|Butrans|Cizdol|Cod[ei]([ei])?n(e)?|Conzip|darvo|dazidox|Demerol|d[iea]l([auo])?([auo])?d[eai]d|dolophine|dur[ao]ge|Duramorph|eth([[:punct:]])?oxydose|Exalgo|fent|Fortral|Fortwin|Haldid|Hycodan|Hydromor|Infumorph|Instanyl|Kadian|Levo([[:punct:]])?Dromoran|Levorphanol|Lorcet|Lortab|Matrifen|Meperi|Moradol|morph[ia]|MSContin|MSIR|Nalbuphine|norspan|nubain|Numorphan|Onsolis|opana|Oramorph|oxaydo|oxy[cmd]o|oxyfast|oxyIR|Palladone|Pentazocine|perco|Propoxyphene|Roxano|Rybix|sevredol|Sosegon|Stadol|Sublimaze|Suboxone|subsys|Subutex|Talwin|temgesic|ultram|zytram|transtec|tylox|vico|Zubsolv|ultra[sc]et|roxi|zohydro|codone| norco"
+
+# Heroin overdoses
+heroin_ICD_9_pattern <- "(\n|^|\\W)(965.01)"
+heroin_ICD_10_pattern <- "T40.1X"
+heroin_text_pattern <- "heroin|herion|dope|smack|junk|skag|china white|hero"
+
+# Stimulant overdoses
+stimulant_ICD_9_pattern <- "(\n|^|\\W)(970)"
+stimulant_ICD_10_pattern <- "T40.5X|T43.60|T43.61|T43.62|T43.63|T43.64|T43.69"
+stimulant_text_pattern <- "AMPHETA|AD(D)?[EA]R[EA]L|CONCERTA|RITALIN|FOCALIN|VYVANSE|cocaine|cocane|cociane|COC(C)?A(A)?(I)?N(E)?|COKE|BLOW|CRA[CK]([CK])?|MET(H)?AMP(H)?[EA]T[EA]MINE| METH | SPEED|stimulant"
+
+# Cocaine alone
+cocaine_ICD_9_pattern <- "(\n|^|\\W)970.81"
+cocaine_ICD_10_pattern <- "T40.5X"
+cocaine_text_pattern <- "cocaine|cocane|cociane|crack|COC(C)?A(A)?(I)?N(E)?|COKE|BLOW|CRA[CK]([CK])?"
+
+# Cannabis overdoses
+cannabis_ICD_pattern <- "T40.7X"
+cannabis_text_pattern <- "SPICE |BLACK MAMBA|LEGAL HIGH|ZOMBIE|VOODOO DOLL|BLACK MAGIC|CLOUD 10|CLOUD TEN|CLOUD 9|CLOUD NINE|POT( )?|POTPOURRI|WICKED X|cannabis|marijuana|mary jane "
+
+# Narcan/Naloxone given
+naloxone_pattern <- "nar[ck]an|naloxo(ne)?"
+
+# Make the flags - for ICD matching: look in combination with the flag for Overdose_ICD_All in order to be more precise and NOT include adverse effect or underdosing ICDs
+overdoseData <- overdoseData %>% mutate(
+  Overdose_opioid_ICD = case_when(grepl(opioid_ICD_10_pattern, Diagnosis)|grepl(opioid_ICD_9_pattern, Diagnosis) & Overdose_ICD_All=="Y" ~"Y", 
+                         TRUE ~ "UNK"),
+  Overdose_heroin_ICD = case_when(grepl(heroin_ICD_10_pattern, Diagnosis)|grepl(heroin_ICD_9_pattern, Diagnosis) & Overdose_ICD_All=="Y" ~"Y", 
+                         TRUE ~ "UNK"),
+  Overdose_stimulant_ICD = case_when(grepl(stimulant_ICD_10_pattern, Diagnosis)|grepl(stimulant_ICD_9_pattern, Diagnosis) & Overdose_ICD_All=="Y" ~"Y", 
+                         TRUE ~ "UNK"),
+  Overdose_cocaine_ICD = case_when(grepl(cocaine_ICD_10_pattern, Diagnosis)|grepl(cocaine_ICD_9_pattern, Diagnosis) & Overdose_ICD_All=="Y" ~"Y", 
+                         TRUE ~ "UNK"),
+  Overdose_cannabis_ICD = case_when(grepl(cannabis_ICD_pattern, Diagnosis) & Overdose_ICD_All=="Y" ~"Y", 
+                         TRUE ~ "UNK"),
+  Overdose_opioid_Text = case_when(grepl(opioid_text_pattern, paste(`Current Complaint`, `Initial Complaint`, 
+                                                                    `Encounter Reason`), ignore.case = TRUE) ~ "Y", 
+                         TRUE ~ "UNK"),
+  Overdose_heroin_Text = case_when(grepl(heroin_text_pattern, paste(`Current Complaint`, `Initial Complaint`, 
+                                                                    `Encounter Reason`), ignore.case = TRUE) ~ "Y", 
+                         TRUE ~ "UNK"),
+  Overdose_stimulant_Text = case_when(grepl(stimulant_text_pattern, paste(`Current Complaint`, `Initial Complaint`, 
+                                                                          `Encounter Reason`), ignore.case = TRUE) ~ "Y", 
+                         TRUE ~ "UNK"),
+  Overdose_cocaine_Text = case_when(grepl(cocaine_text_pattern, paste(`Current Complaint`, `Initial Complaint`, 
+                                                                      `Encounter Reason`), ignore.case = TRUE) ~ "Y", 
+                         TRUE ~ "UNK"),
+  Overdose_cannabis_Text = case_when(grepl(cannabis_text_pattern, paste(`Current Complaint`, `Initial Complaint`, 
+                                                                        `Encounter Reason`), ignore.case = TRUE) ~ "Y", 
+                         TRUE ~ "UNK")
+) %>% mutate( # Relies on ICD variables being made first
+  Overdose_opioid_all = case_when( (Overdose_opioid_ICD == "Y" | Overdose_opioid_Text =="Y") ~ "Y",
+                                   TRUE ~ "UNK"),
+  Overdose_heroin_all = case_when( (Overdose_heroin_ICD == "Y" | Overdose_heroin_Text == "Y") ~ "Y",
+                                   TRUE ~ "UNK"),
+  Overdose_stimulant_all = case_when( (Overdose_stimulant_ICD == "Y" | Overdose_stimulant_Text == "Y") ~ "Y",
+                                   TRUE ~ "UNK"),
+  Overdose_cocaine_all = case_when( (Overdose_cocaine_ICD == "Y" | Overdose_cocaine_Text == "Y") ~ "Y",
+                                   TRUE ~ "UNK"),
+  Overdose_cannabis_all = case_when( (Overdose_cannabis_ICD == "Y" | Overdose_cannabis_Text == "Y") ~ "Y",
+                                   TRUE ~ "UNK"),
+  Naloxone_overdose = case_when(grepl(naloxone_pattern, paste(`Current Complaint`, `Initial Complaint`, 
+                                                              `Encounter Reason`, `Clinical Impression`), ignore.case = TRUE) ~ "Y", 
+                         TRUE ~ "UNK"), 
+  Accidental = case_when(grepl("accidental|unintentional", Diagnosis, ignore.case = TRUE) ~ "Y",
+                         TRUE ~ "UNK") # Mark accidental poisonings in the overdose dataset
+)
+```
+
+
+Use tables to view the breakdown of ICD flags alone vs with text patterns
+```{r tableOverdoses **12/2020 Samantha Lynn Bell, DHD**}
+cat("Opioid\n")
+ftable(Text = overdoseData$Overdose_opioid_Text, ICD = overdoseData$Overdose_opioid_ICD)
+cat("Total Flagged:", dim(overdoseData[overdoseData$Overdose_opioid_all=="Y",])[1])
+cat("\n\nHeroin\n")
+ftable(Text = overdoseData$Overdose_heroin_Text, ICD = overdoseData$Overdose_heroin_ICD)
+cat("Total Flagged:", dim(overdoseData[overdoseData$Overdose_heroin_all=="Y",])[1])
+cat("\n\nStimulant\n")
+ftable(Text = overdoseData$Overdose_stimulant_Text, ICD = overdoseData$Overdose_stimulant_ICD)
+cat("Total Flagged", dim(overdoseData[overdoseData$Overdose_stimulant_all=="Y",])[1])
+cat("\n\nCocaine\n")
+ftable(Text = overdoseData$Overdose_cocaine_Text, ICD = overdoseData$Overdose_cocaine_ICD)
+cat("Total Flagged", dim(overdoseData[overdoseData$Overdose_cocaine_all=="Y",])[1])
+cat("\n\nCannabis\n")
+ftable(Text = overdoseData$Overdose_cannabis_Text, ICD = overdoseData$Overdose_cannabis_ICD)
+cat("Total Flagged", dim(overdoseData[overdoseData$Overdose_cannabis_all=="Y",])[1])
+
+cat("\n\nTotal overdoses with naloxone mentioned", dim(overdoseData[overdoseData$Naloxone_overdose=="Y",])[1])
+```
+
+
+Look for Detox/Withdrawl cases
+Look for Unresponsive cases
+```{r detox **12/2020 Samantha Lynn Bell, DHD**}
+overdoseData <- overdoseData %>% mutate(
+  Detox_or_Withdrawl = case_when(grepl("withdrawl|detox", `Encounter Reason`, ignore.case = TRUE)~"Y",
+                                 TRUE ~ "UNK"),
+  Unresponsive = case_when(grepl("unresponsive", paste(`Current Complaint`, `Encounter Reason`, `Clinical Impression`), ignore.case = TRUE)~"Y",
+                           TRUE ~ "UNK"))
+ftable(Detox_or_Withdrawl_Overdoses = overdoseData$Detox_or_Withdrawl)
+ftable(Unresponsive_Overdoses = overdoseData$Unresponsive)
+
+# Manually review the associated substances 
+detoxReview <- overdoseData %>% filter(Detox_or_Withdrawl == "Y") 
+unresponsiveReview <- overdoseData %>% filter(Unresponsive == "Y") 
+```
+
+
+Note some combinations
+```{r combinations **12/2020 Samantha Lynn Bell, DHD**}
+overdoseData <- overdoseData %>% mutate(
+  Overdose_Opioid_and_Stimulant = case_when( (Overdose_opioid_all=="Y" & Overdose_stimulant_all=="Y") ~ "Y",
+                                            TRUE ~ "UNK"), 
+  Overdose_Opioid_and_Cannabis = case_when( (Overdose_opioid_all=="Y" & Overdose_cannabis_all=="Y") ~ "Y", 
+                                           TRUE ~ "UNK"))
+```
+
+FOR CUMULATIVE RATES:
+exclude years prior to 2018 due to under-reporting and poor capture of overdose counts in the various categories - which would pull down the rates
+
+Rates per 10k
+-Denominator is the total number of EMS events during this time period
+-Result multiplied by 10k
+
+# Set up some tables with the visit counts and overdose counts for various categories
+```{r countTables}
+# All EMS visits by year
+all_EMS_totals_yearly <- Full_data %>% group_by(year(AdmissionDate)) %>% summarise(`Total Events by Year` = n())
+
+# All EMS visit counts by age & gender combinations - total since 2018
+age_gender_totals_since2018 <- Full_data[year(Full_data$AdmissionDate)>=2018,] %>% group_by(Age_Range, Gender) %>% summarise(`Total Events by Age and Gender` = n(), )
+
+# All EMS visit counts by age & gender combinations - totaled by individual year
+age_gender_totals_yearly <- Full_data %>% group_by(year(AdmissionDate), Age_Range, Gender) %>% summarise(`Total Events by Age and Gender - Yearly` = n())
+
+# All EMS visits by Patient Zip - totaled by year
+zip_totals_yearly <- Full_data %>% group_by(year(AdmissionDate), Detroit_Zip) %>% summarise(`Total Events Within Zip by Year` = n())
+```
+
+# Set up the overdose count tables
+```{r overdoseCountTables}
+# Grab all the categories, use these to join so that rows with no counts still appear in the tables
+year <- all_EMS_totals_yearly[,1]
+year_sex <- age_gender_totals_yearly[,1:3]
+year_zip <- zip_totals_yearly[,1:2]
+
+# All overdoses by year
+OD_by_year <- left_join(year, (overdoseData %>% group_by(year(AdmissionDate), .drop = FALSE) %>% summarise(`Total OD by Year` = n())), by = "year(AdmissionDate)")
+
+# All overdoses by age and gender since 2018
+OD_age_gender_totals_since2018 <- overdoseData[year(overdoseData$AdmissionDate)>=2018,] %>% group_by(Age_Range, Gender) %>% 
+                                                         summarise(`Total OD by Age and Gender` = n())
+
+# Overdoses by age and gender - totaled by year
+OD_age_gender_yearly <- left_join(year_sex, (overdoseData %>% group_by(year(AdmissionDate), Age_Range, Gender, .drop = FALSE) %>% 
+                                               summarise(`Total OD by Age and Gender - Yearly` = n())),  by = c("year(AdmissionDate)", "Age_Range", "Gender"))
+ 
+# Overdoses by patient zip - totaled by year
+OD_zip_yearly <- left_join(year_zip, (overdoseData %>% group_by(year(AdmissionDate), Detroit_Zip, .drop = FALSE) %>% 
+                                        summarise(`Total OD Within Zip by Year` = n())), by = c("year(AdmissionDate)", "Detroit_Zip"))
+
+# Overdoses by type - since 2018 (one number for each type subset)
+OD_Opioid_since2018 <- dim(overdoseData[(year(overdoseData$AdmissionDate)>=2018) & overdoseData$Overdose_opioid_all=="Y",])[1]
+OD_Stimulant_since2018 <- dim(overdoseData[(year(overdoseData$AdmissionDate)>=2018) & overdoseData$Overdose_stimulant_all=="Y",])[1]
+
+# Overdoses by type - totaled by year (one table for each type subset)
+OD_Opioid_yearly <- left_join(year, (overdoseData %>% group_by(year(AdmissionDate), .drop = FALSE) %>% summarise(`Total Opioid OD by Year` = sum(Overdose_opioid_all=="Y"))), by = "year(AdmissionDate)")
+OD_Stimulant_yearly <- left_join(year, (overdoseData%>% group_by(year(AdmissionDate), .drop = FALSE) %>% 
+                                          summarise(`Total Stimulant OD by Year` = sum(Overdose_stimulant_all=="Y"))), by = "year(AdmissionDate)")
+
+# Overdoses by type, age and gender - totaled by year (one table for each type subset)
+OD_Opioid_age_gender_yearly <- left_join(year_sex, (overdoseData %>% group_by(year(AdmissionDate), Age_Range, Gender, .drop = FALSE) %>% 
+  summarise(`Total Opioid OD by Age and Gender - Yearly` = sum(Overdose_opioid_all=="Y"))), by = c("year(AdmissionDate)", "Age_Range", "Gender"))
+OD_Stimulant_age_gender_yearly <- left_join(year_sex, (overdoseData %>% group_by(year(AdmissionDate), Age_Range, Gender, .drop = FALSE) %>% 
+  summarise(`Total Stimulant OD by Age and Gender - Yearly` = sum(Overdose_stimulant_all=="Y"))), by = c("year(AdmissionDate)", "Age_Range", "Gender"))
+
+```
+
+# Make the rates
+```{r makeRates}
+# One cumulative rate of overdoses since 2018
+denominator <- dim(Full_data[year(Full_data$AdmissionDate)>=2018,])[1]
+overdoseDataSub <- overdoseData %>% filter(year(AdmissionDate)>=2018)
+overdoseData$Cumulative_overdose_rate_since_2018 <-  (dim(overdoseDataSub[overdoseDataSub$Overdose_complete_All == "Y",])[1])/denominator * 10000
+
+# Opioid overdoses since 2018
+overdoseData$Opioid_overdose_rate_since_2018 <- (OD_Opioid_since2018/denominator) * 10000
+
+# Stimulant overdoses since 2018
+overdoseData$Stimulant_overdose_rate_since_2018 <- (OD_Stimulant_since2018/denominator) * 10000
+
+# All overdoses by Age and Gender since 2018
+Overdoses_rates_age_gender_since2018 <- left_join(age_gender_totals_since2018, OD_age_gender_totals_since2018) %>% mutate(
+  OD_Rate = (`Total OD by Age and Gender`/`Total Events by Age and Gender`) * 10000)
+
+# By year only
+OD_by_year <- OD_by_year %>% mutate(
+  # All overdoses by year
+  Total_EMS_visits_yearly = all_EMS_totals_yearly$`Total Events by Year`,
+  Overdose_rates_yearly = (OD_by_year$`Total OD by Year`/all_EMS_totals_yearly$`Total Events by Year`) * 10000,
+  # Opioid overdoses by year
+  Opioid_overdose_count_yearly = OD_Opioid_yearly$`Total Opioid OD by Year`,
+  Opiod_overdose_rates_yearly = (OD_Opioid_yearly$`Total Opioid OD by Year`/all_EMS_totals_yearly$`Total Events by Year`) * 10000,
+  # Stimulant overdoses by year
+  Stimulant_overdose_count_yearly = OD_Stimulant_yearly$`Total Stimulant OD by Year`, 
+  Stimulant_overdose_rates_yearly = (OD_Stimulant_yearly$`Total Stimulant OD by Year`/all_EMS_totals_yearly$`Total Events by Year`) * 10000
+  )
+
+# By age and gender yearly
+  # All overdoses by year
+  OD_age_gender_yearly$Total_EMS_visits_yearly <- age_gender_totals_yearly$`Total Events by Age and Gender - Yearly`
+  OD_age_gender_yearly$Overdose_rates_yearly <- (OD_age_gender_yearly$`Total OD by Age and Gender - Yearly`/age_gender_totals_yearly$`Total Events by Age and Gender - Yearly`) * 10000
+  # Opioid overdoses by year
+  OD_age_gender_yearly$Opioid_overdose_count_yearly <- OD_Opioid_age_gender_yearly$`Total Opioid OD by Age and Gender - Yearly`
+  OD_age_gender_yearly$Opiod_overdose_rates_yearly <- (OD_Opioid_age_gender_yearly$`Total Opioid OD by Age and Gender - Yearly`/age_gender_totals_yearly$`Total Events by Age and Gender - Yearly`) * 10000
+  # Stimulant overdoses by year
+  OD_age_gender_yearly$Stimulant_overdose_count_yearly <-  OD_Stimulant_age_gender_yearly$`Total Stimulant OD by Age and Gender - Yearly`
+  OD_age_gender_yearly$Stimulant_overdose_rates_yearly <- 
+    (OD_Stimulant_age_gender_yearly$`Total Stimulant OD by Age and Gender - Yearly`/age_gender_totals_yearly$`Total Events by Age and Gender - Yearly`) * 10000
+
+# All overdoses by zip and year
+OD_zip_yearly$Zip_Event_count <- zip_totals_yearly$`Total Events Within Zip by Year`
+OD_zip_yearly$Zip_overdose_rates_yearly <- (OD_zip_yearly$`Total OD Within Zip by Year`/zip_totals_yearly$`Total Events Within Zip by Year`) * 10000
+
+```
+
+
+
+## Monthly Rates - rate by month+year (ex- Feb-2020) ##
+
+Set up a function to make rates for binned data (in this case will be used for monthly rates)
+Set up a function run through list of rate variables to be made, and call on the rate function to make rates for each
+
+Denominator = Total number of events within the category and time period
+Numerator = number of overdoses within the category and time period
+
+# full_data_category = a vector made by pulling the data column containing the category information within the full dataset (provided as Full_data$column)
+# dataset = the overdose dataset from which the overdoses are counted
+# overdose_type_list = list of vectors containing the desired overdose Y/N columns (list of c(data$column, data$column2, etc))
+# overdose_type = one vector from the overdose_type_list which is passed from Make_Rate_Vars() to Make_Rates()
+# overdose_data_category = a vector made by pulling the data column containing the category information within the overdose dataset (provided as data$column)
+# bin = vector containing unique bins for which rates will be made (ex: months or zip codes, etc). Supplied using unique(data$column)
+# vars_list = A list of empty variables for each monthly rate that will be made. SAME ORDER AS overdose_type_list
+# k = the number to multiply by when making the rate (rate per 10k, 100k, etc)
+```{r rateFunction **12/2020 Samantha Lynn Bell, DHD**}
+#STEP 1
+# Variable assignment function
+Make_Rate_Vars <- function(vars_list, bin, full_data_category, dataset, overdose_type_list, overdose_data_category, k){
+  rate_table <- as_data_frame(rep("x", length(bin))) # Start the rate table with a dummy column the length of the bin (i.e. 12 for 12 months)
+  for(var in 1:length(vars_list)){ # for each empty variable to be made,
+    temp <- ""
+    for(i in 1:length(bin)){ # and for each bin category
+      # call on the Make_Rates function to get a single rate and assign it to the same index as that bin (a rate for January matches with January in month bin vector)
+      temp[i] <- Make_Rates(full_data_category, dataset, overdose_type_list[var][1], overdose_data_category, bin[i], k)
+    }
+    # add a new column to the rate table, containing vector of rates length of the bins, use !! := to assign the name of the variable based on the currently selected empty var in the loop
+    rate_table <- rate_table %>% mutate(!!vars_list[var] := temp) 
+  }
+  return(rate_table) # Return a full rate table with column for each name in vars_list
+}
+
+#STEP 2
+# Rate function
+Make_Rates <- function(full_data_category, dataset, overdose_type, overdose_data_category, category, k){ # takes these from Make_Rate_Vars
+  a <- which(overdose_type == "Y" & overdose_data_category==category) #check which row numbers of the overdose data are within the chosen category and have a Y in the overdose type column 
+  num <- dim(dataset[a,])[1] #count the number of rows that met the criteria for a, out of the dataset in question. This is the numerator
+  denom <- dim(Full_data[(full_data_category==category)&year(Full_data$AdmissionDate)%in%year(dataset$AdmissionDate),])[1] #count the number of rows in the FULL data that are within the chosen category and the year ranges that were passed with the overdose dataframe. This is denominator
+  return( ( num/denom ) * k ) # return a single rate number, using the k provided (10,000 / 100,000 / etc)
+}
+```
+
+
+```{r monthlyRates **12/2020 Samantha Lynn Bell, DHD**}
+# Set up a list of empty variables for each monthly rate that will be made
+monthly_rate_variables <- c("monthly_overdose_rate", "monthly_opioid_overdose_rate", "monthly_stimulant_overdose_rate", "monthly_cocaine_overdose_rate",
+                            "monthly_heroin_overdose_rate", "monthly_overdose_text_rate", "monthly_opioid_overdose_text_rate", 
+                            "monthly_stimulant_overdose_text_rate", "monthly_cocaine_overdose_text_rate", "monthly_heroin_overdose_text_rate",
+                            "monthly_overdose_ICD_rate", "monthly_opioid_overdose_ICD_rate","monthly_stimulant_overdose_ICD_rate", 
+                            "monthly_cocaine_overdose_ICD_rate", "monthly_heroin_overdose_ICD_rate")
+
+
+# Save the unique bins that the rates will be created within
+months <- unique(overdoseData$Month)
+
+# Set up a list of the overdose column variables which are the categories the rates are created for (SAME ORDER AS list of empty variables)
+#All
+overdose_variables <- data.frame(overdoseData$Overdose_complete_All, overdoseData$Overdose_opioid_all, overdoseData$Overdose_stimulant_all, overdoseData$Overdose_cocaine_all,
+                        overdoseData$Overdose_heroin_all, overdoseData$Overdose_Text_All, overdoseData$Overdose_opioid_Text, overdoseData$Overdose_stimulant_Text,
+                        overdoseData$Overdose_cocaine_Text, overdoseData$Overdose_heroin_Text, overdoseData$Overdose_ICD_All, overdoseData$Overdose_opioid_ICD, overdoseData$Overdose_stimulant_ICD,
+                        overdoseData$Overdose_cocaine_ICD, overdoseData$Overdose_heroin_ICD)
+    
+# QC the variable fields to make sure they are in the correct order together:
+qc_vars <- cbind(monthly_rate_variables, names(overdose_variables))
+qc_vars
+
+### RUN THE RATES ###----------------------------------------------------
+
+# Fill in the monthly variables, with a unique value for each unique month 
+# This uses the two functions created above (all records, not subset for years)
+monthly_rate_table <- Make_Rate_Vars(monthly_rate_variables, months, Full_data$Month, overdoseData, overdose_variables, overdoseData$Month, 10000)
+# Add months as rownames
+monthly_rate_table <- cbind(months = months, monthly_rate_table) %>% select(!value)
+
+# Apply each monthly rate to the relevant month rows (the Month variable is Month_Year format)
+overdoseData <- left_join(overdoseData, monthly_rate_table, by = c("Month" = "months"))
+overdoseData <- overdoseData %>% mutate_at(vars(contains('rate')), funs(as.numeric(.)))
+```
+
+
+Summaries with data by day and by month
+Show total overdoses by ICD, text, and both 
+```{r overdosSummaries **12/2020 Samantha Lynn Bell, DHD**}
+All_Overdoses_by_Date <- overdoseData %>% 
+  group_by(AdmissionDate, Month, monthly_overdose_ICD_rate, monthly_overdose_text_rate, monthly_overdose_rate) %>% summarise(
+  `Total Overdose count by ICD code or text` = n(), 
+  `Overdose by ICD code` = sum(Overdose_ICD_All=="Y"), 
+  `Overdose by Text` = sum(Overdose_Text_All=="Y"),
+  `Unresponsive Overdoses` = sum(Unresponsive=="Y"))
+
+Opioid_Overdoses_by_Date <- overdoseData %>% 
+  group_by(AdmissionDate, Month, monthly_opioid_overdose_ICD_rate, monthly_opioid_overdose_text_rate, monthly_opioid_overdose_rate) %>% summarise(
+  `Total Overdose count by ICD code or text` = sum(Overdose_opioid_all =="Y"), 
+  `Overdose by ICD code` = sum(Overdose_opioid_ICD=="Y"), 
+  `Overdose by Text` = sum(Overdose_opioid_Text =="Y"),
+  `Unresponsive Overdoses` = sum(Unresponsive=="Y"))
+
+Combination_Overdoses_by_Date1 <- overdoseData %>% filter(Overdose_Opioid_and_Stimulant=="Y") %>% group_by(Month, AdmissionDate) %>% summarise(`Total Overdose count by ICD code or text` = n())
+Combination_Overdoses_by_Date2 <- overdoseData %>% filter(Overdose_Opioid_and_Cannabis=="Y") %>% group_by(Month, AdmissionDate) %>% summarise(`Total Overdose count by ICD code or text` = n())
+
+Stimulant_Overdoses_by_Date <- overdoseData %>% 
+  group_by(AdmissionDate, Month, monthly_stimulant_overdose_ICD_rate, monthly_stimulant_overdose_text_rate, monthly_stimulant_overdose_rate) %>% summarise(
+  `Total Overdose count by ICD code or text` = sum(Overdose_stimulant_all =="Y"), 
+  `Overdose by ICD code` = sum(Overdose_stimulant_ICD=="Y"), 
+  `Overdose by Text` = sum(Overdose_stimulant_Text =="Y"),
+  `Unresponsive Overdoses` = sum(Unresponsive=="Y"))
+
+Heroin_Overdoses_by_Date <- overdoseData %>% 
+  group_by(AdmissionDate, Month, monthly_heroin_overdose_ICD_rate, monthly_heroin_overdose_text_rate, monthly_heroin_overdose_rate) %>% summarise(
+  `Total Overdose count by ICD code or text` = sum(Overdose_heroin_all =="Y"), 
+  `Overdose by ICD code` = sum(Overdose_heroin_ICD=="Y"), 
+  `Overdose by Text` = sum(Overdose_heroin_Text =="Y"),
+  `Unresponsive Overdoses` = sum(Unresponsive=="Y"))
+
+Cocaine_Overdoses_by_Date <- overdoseData %>% 
+  group_by(AdmissionDate, Month, monthly_cocaine_overdose_ICD_rate, monthly_cocaine_overdose_text_rate, monthly_cocaine_overdose_rate) %>% summarise(
+  `Total Overdose count by ICD code or text` = sum(Overdose_cocaine_all =="Y"), 
+  `Overdose by ICD code` = sum(Overdose_cocaine_ICD=="Y"), 
+  `Overdose by Text` = sum(Overdose_cocaine_Text =="Y"),
+  `Unresponsive Overdoses` = sum(Unresponsive=="Y"))
+
+Cannabis_Overdoses_by_Date <- overdoseData %>%
+  group_by(AdmissionDate, Month) %>% summarise(
+  `Total Overdose count by ICD code or text` = sum(Overdose_cocaine_all =="Y"), 
+  `Overdose by ICD code` = sum(Overdose_cocaine_ICD=="Y"), 
+  `Overdose by Text` = sum(Overdose_cocaine_Text =="Y"),
+  `Unresponsive Overdoses` = sum(Unresponsive=="Y"))
+
+ftable(Detox_or_Withdrawl_Opioid_Overdoses = overdoseData$Detox_or_Withdrawl[overdoseData$Overdose_opioid_all=="Y"])
+ftable(Unresponsive_Opioid_Overdoses = overdoseData$Unresponsive[overdoseData$Overdose_opioid_all=="Y"])
+ftable(Opioid_Overdose_by_time = overdoseData$Time_of_Day[overdoseData$Overdose_opioid_all=="Y"])
+
+ftable(Detox_or_Withdrawl_Stimulant_Overdoses = overdoseData$Detox_or_Withdrawl[overdoseData$Overdose_stimulant_all=="Y"])
+ftable(Unresponsive_Stimulant_Overdoses = overdoseData$Unresponsive[overdoseData$Overdose_stimulant_all=="Y"])
+ftable(Stimulant_Overdose_by_time = overdoseData$Time_of_Day[overdoseData$Overdose_stimulant_all=="Y"])
+
+ftable(Detox_or_Withdrawl_Opioid_Stimulant_Overdoses = overdoseData$Detox_or_Withdrawl[overdoseData$Overdose_Opioid_and_Stimulant=="Y"])
+ftable(Unresponsive_Opioid_Stimulant_Overdoses = overdoseData$Unresponsive[overdoseData$Overdose_Opioid_and_Stimulant=="Y"])
+ftable(Opioid_Stimulant_Overdose_by_time = overdoseData$Time_of_Day[overdoseData$Overdose_Opioid_and_Stimulant=="Y"])
+
+ftable(Detox_or_Withdrawl_Opioid_Cannabis_Overdoses = overdoseData$Detox_or_Withdrawl[overdoseData$Overdose_Opioid_and_Cannabis=="Y"])
+ftable(Unresponsive_Opioid_Cannabis_Overdoses = overdoseData$Unresponsive[overdoseData$Overdose_Opioid_and_Cannabis=="Y"])
+ftable(Opioid_Cannabis_Overdose_by_time = overdoseData$Time_of_Day[overdoseData$Overdose_Opioid_and_Cannabis=="Y"])
+
+ftable(Naloxone = overdoseData$Naloxone_overdose, Time = overdoseData$Time_of_Day)
+```
+
+Total events by dates
+```{r}
+byDate <- Full_data %>% group_by((AdmissionDate)) %>% summarise(n=n())
+byMonth <-  Full_data %>% group_by(month(AdmissionDate), year(AdmissionDate)) %>% summarise(n=n())
+byYear <-  Full_data %>% group_by(year(AdmissionDate)) %>% summarise(n=n())
+```
+
+Save the subsets to file
+```{r Save **12/2020 Samantha Lynn Bell, DHD**}
+write_xlsx(x = Caffeine, path = paste0(outputLocation, "Caffeine cases.xlsx")) #check for affects the caffeine records have on the stimulant overdose count, and which are caffeine alone
+write_xlsx(path=paste0(outputLocation,"All Substance Abuse Records.xlsx"), x = substanceAbuseData)
+write_xlsx(path=paste0(outputLocation,"All Overdose Records.xlsx"), x = overdoseData)
+
+# Create and save a workbook with the overdoses by date for each type
+# Run if trouble creating workbook object:
+## detach("package:openxlsx", unload=TRUE)
+## library(openxlsx)
+rm(bookByDate)
+bookByDate <- createWorkbook() # make the book
+# Make the sheets and save associated table to the sheet
+sheets <- c("ED visits by Date", "ED visits by Month", "ED visits by year", "
+            All Overdoses", "Opioid OD", "Stimulant OD", "Heroin OD", "Cocaine OD", "Cannabis OD",
+            "Opioid-Stim OD", "Opioid-Cannabis OD", "Alcohol-Substance Ab", "OD age and sex since 2018", 
+            "Overdose by year", "OD age and sex", "OD Zip and year", "monthly rates",
+            "Alcohol-related dz", "Vape-related dz", "Fentanyl", "Neonatal")
+data <- list(byDate, byMonth, byYear, 
+             All_Overdoses_by_Date, Opioid_Overdoses_by_Date, Stimulant_Overdoses_by_Date, Heroin_Overdoses_by_Date, Cocaine_Overdoses_by_Date,
+             Cannabis_Overdoses_by_Date, Combination_Overdoses_by_Date1, Combination_Overdoses_by_Date2, Alcohol_by_Date_ICD,  
+             Overdoses_rates_age_gender_since2018, OD_by_year, OD_age_gender_yearly, OD_zip_yearly, monthly_rate_table,
+             alcoholData, vapeData, fentanylData, neonatal)
+for(i in 1:length(sheets)){
+  addWorksheet(bookByDate, sheets[i])
+  writeData(bookByDate, sheets[i], data[[i]], colNames = TRUE)}
+
+# Print to file
+saveWorkbook(wb = bookByDate, file = paste0(outputLocation, "Overdoses and Rates - by Date and Type.xlsx"), overwrite = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
