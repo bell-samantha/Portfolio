@@ -1,0 +1,726 @@
+---
+title: "COVID Outbreak & Employer"
+author: "Samantha L Bell"
+date: "9/15/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+____________________________________________________________________________________
+What does this script need?
+____________________________________________________________________________________
+
+This script takes in:
+1- MDSS disease specific search for confirmed Covid-19 cases in Michigan (Base case investigation) - All counties 2 weeks disease specific search
+2- List of top employers, with repeating rows for name/address variations
+3- Smartsheet which tracks incoming employer calls: “Reported COVID-19+ Employees”, as Excel file
+4- Smartsheet which tracks potential exposure sites for MDSS cases: "Responses - Exposures Call Form", as Excel file
+5- Aggregate Outbreaks list downloaded from MDSS, as Excel file
+
+
+____________________________________________________________________________________
+What does this script do?
+____________________________________________________________________________________
+1- Load the data 
+2- Create simple dataframes from desired variables
+3- Check for mention of top employers
+4- Check for mention of key phrases
+5- Elucidate unknown top key words
+6- Elucidate unknown top key phrases of set lengths
+7- Check outbreak names and compare them to the aggregate outbreaks
+8- Print output tables to file
+
+__________________________________________________________________________________
+INSTRUCTIONS
+____________________________________________________________________________________
+1- Fill in required necessary information in fields that look like this: 
+# ************************************************************************************#
+#      Text Here
+#
+# ************************************************************************************#
+2- Then click the green run button for that block of code
+
+## Samantha Lynn Bell DHD 2020 ##
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Check for installed packages. Please make certain that the following packages are installed and then run the code to load libraries:
+```{r libraries}
+library(knitr)
+library(openxlsx)
+library(writexl)
+library(tidyverse)
+library(summarytools)
+library(anytime)
+library(corpus)
+library(doParallel)
+library(reshape)
+library(stringr)
+library(readxl)
+library(lubridate)
+
+# Detect number of cores and prepare to run parallel loops later
+no_cores <- detectCores() - 1  
+cl <- makeCluster(no_cores)  
+# Run parallel
+registerDoParallel(cl)
+
+# Set up progress bar - show every 20 iterations
+imax<-c(10)
+pb <- txtProgressBar(min = 0, max = imax, style = 3)
+
+# Start the clock!
+ptm <- proc.time()
+```
+
+## Enter location where files are located and new files will be saved
+```{r location&info ## Samantha Lynn Bell DHD 2020 ##}
+
+### TYPE THE PATH OR FILENAME BETWEEN THE "". SLASHES MUST FACE THIS DIRECTION: / ###
+# ************************************************************************************#
+# Flexible prefix to output location and file loading
+location <- ""
+location2 <- ""
+
+if(dir.exists("S:/Health/Epidemiology")){
+  location <- "S:/Health/Epidemiology/Data/MDSS/original/COVD-19 Coronavirus/2020_03_Coronavirus/Outbreaks&Employers"
+  location2 <- "S:/Health/Epidemiology/Projects/COVID-19/Outbreaks/Casino Line List"
+  }
+if(dir.exists("Z:/Epidemiology")){
+  location <- "Z:/Epidemiology/Data/MDSS/original/COVD-19 Coronavirus/2020_03_Coronavirus/Outbreaks&Employers"
+  location2 <- "Z:/Epidemiology/Projects/COVID-19/Outbreaks/Casino Line List"
+  }
+
+OutFolder <- paste0("Analyzed Outbreaks & Employers", "/", Sys.Date(), "_Analysis") #Name of folder for output to be written
+dir.create(paste0(location, "/", OutFolder))
+
+EmployerList <- "Top_Employers_Detroit.xlsx" # Name of top employer file
+
+SchoolList <- "All Detroit Schools - REGEX.xlsx" # Name of school/daycare list file
+
+CallTracking <- "Reported COVID-19+ Employees.xlsx" # Name of Smartsheet extract from which incoming employer calls are recorded
+
+ExposureTracking <- "Responses - Exposures Call Form.xlsx" # Name of Smartsheet extract from which exposure sources are tracked (a call log)
+
+AggregateOutbreaks <- "aggregate.csv" # Name of aggregate outbreak file downloaded from MDSS
+
+```
+
+
+```{r loadEmployers&Schools ## Samantha Lynn Bell DHD 2020 ##}
+  # Top Employer list 
+Employers <- readWorkbook(paste0(location, "/", EmployerList), sheet = 1, na.strings = c('NA', '#N/A', '')) 
+
+  # Schools and Daycares
+
+Schools <- readWorkbook(paste0(location, "/", SchoolList), sheet = 1, na.strings = c('NA', '#N/A', '')) 
+```
+
+```{r loadAgg  # Samantha Lynn Bell DHD 2020 #}
+# Load the aggregate outbreaks for the City of Detroit only
+aggregate <- as_tibble(read.csv(paste0(location, "/", AggregateOutbreaks), comment.char="#"))
+```
+
+##Load the patient data from MDSS
+(See the overview document for a description of the fields chosen.)
+
+```{r loadMDSS ## Samantha Lynn Bell DHD 2020 ##}
+#suppressWarnings(patientData <- read_excel(paste0(location, "/", "Raw_for_Outbreaks.xlsx")))
+
+suppressWarnings(patientData1 <- read_excel(paste0(location, "/", "Raw_for_Outbreaks.xlsx")))
+suppressWarnings(patientData2 <- read_excel(paste0(location, "/", "Raw_for_Outbreaks2.xlsx")))
+
+#for problems with the reading in the file above use the following code --> uncomment and run
+#patientData1 <- readWorkbook(paste0(location, "/", "Raw_for_Outbreaks.xlsx"), sheet = 1, na.strings = c('NA', '#N/A', ''))
+#patientData2 <- readWorkbook(paste0(location, "/", "Raw_for_Outbreaks2.xlsx"), sheet = 1, na.strings = c('NA', '#N/A', ''))
+#nam1 <- which(grepl("Date", colnames(patientData1))&!grepl("Collection|Report", colnames(michigan2)))
+#patientData1 <- patientData1 %>% mutate_at(vars(nam1), funs(convertToDate(.)))
+#nam2 <- which(grepl("Date", colnames(patientData2))&!grepl("Collection|Report", colnames(michigan1)))
+#patientData2 <- patientData2 %>% mutate_at(vars(nam2), funs(convertToDate(.)))
+
+#patientData1 <- patientData1 %>% mutate_all(as.character)
+#patientData2 <- patientData2 %>% mutate_all(as.character)
+
+#merge input files
+diff <- anti_join(patientData1,patientData2,by="InvestigationID")
+patientData <-  rbind(diff,patientData2)
+rm(diff,patientData1, patientData2)
+
+#Update age variable to numeric just in case the alternate code above was run
+patientData$Age <- as.numeric(patientData$Age)
+
+startDate <- anydate(min(patientData$Referral_Date)) #What start date do we want to select data for monitoring? (Oldest referral date we want to look at)
+
+# Subset for surrounding Jurisdictions, and for the date specified above (starting with referrals on that date)
+subsetPatients <- patientData %>% filter(
+  JURISDICTION %in% c("Wayne County", "Detroit City", "Macomb County", "Oakland County", "Washtenaw County", "Livingston County", "Monroe County"),
+  anydate(Referral_Date)>=anydate(startDate))
+
+# Gather patient fields needed for analysis + comments and free text
+# Filter by start date
+patientOccupations <- subsetPatients %>% filter(anydate(Referral_Date) >= anydate(startDate)) %>%  
+  mutate(
+      Age_In_Years = case_when( # if age is in months, convert to years in new column
+      Age_Units == "Mo" | Age_Units == "mo" ~ round(Age/12, digits = 2),
+      Age_Units == "a" | Age_Units == "a" ~ Age,
+      TRUE ~ Age # Otherwise keep the age (in years already)
+    )) %>% 
+  mutate(Occupation2 = case_when( # Identify students using age criteria when school fields are missing
+      !is.na(Primary_or_secondary_school_C) & is.na(Occupations_Grade) & Age_In_Years >5 & Age_In_Years <=23 ~ "Student",
+      TRUE ~ Occupations_Grade)) %>% 
+  select(InvestigationID, Referral_Date, Case_Status, Street_Address001, Street_Address002, Street_Address003, Street_Address004, Worksites_School, Occupations_Grade, 
+         Workplace_outside_of_home_oth, Name014, LTC_SNF_assisted_living_adult, Name, Primary_or_secondary_school_C,
+         Name003, Jail_prison_detention_center, Name000, Childcare_Youth_programs_e_g_, Name004,
+         Other_Essential_Worker_Critic, If_yes__name_of_facility, Occupation2, 
+         If_yes__name_of_employer, If_yes__name_of_employer000, If_yes__please_specify_facili, Community_event_mass_gatherin,
+         Name009,Other___may_include_previousl, Location__address_or_best_des009,
+         Comments_or_Additional_Inform, What_best_describes_where_the, Outbreak_Name,If_checked__outbreak_name_or_, JURISDICTION)
+```
+
+```{r loadCalls  # Samantha Lynn Bell DHD 2020 #}
+####
+# The employer call Smartsheet
+Calls <- readWorkbook(paste0(location, "/", CallTracking), sheet = 1, na.strings = c('NA', '#N/A', ''), detectDates = TRUE) 
+# subset the call data for relevant employer/occupation information and filter by using start date
+callOccupations <- Calls %>% select(Created, `CALL.SUMMARY.-.FOLLOW.SCRIPT.DO.NOT.ASSUME`, `Business/Organization.Name.and.Full.Address`,
+                                    `Follow-up.Comments.-.INCLUDE.DATE.AND.INITIALS`, `Date.of.COVID-19.Test.(if.known)`,
+                                    `Last.Date.Worked`, `Symptom.Onset.Date.(if.blank,.Asx)`, `School/Business/Org.Name.and.Full.Address`) 
+# fix the date field and use it to filter for recent cases
+callOccupations$Created <- as.Date(callOccupations$Created, origin = "1900-01-01")
+callOccupations <- callOccupations %>% filter(anydate(Created)>=anydate(startDate))
+if(dim(callOccupations)[1]<1){stop("WARNING - You have no employer call observations for the selected date range")}
+
+####
+# The exposure site call Smartsheet
+callExposures <- readWorkbook(paste0(location, "/", ExposureTracking))
+# fix the date field and use it to filter for recent cases
+callExposures$Created <- as.Date(callExposures$Created, origin = "1900-01-01")
+callExposures <- callExposures %>% filter(anydate(Created)>=anydate(startDate))
+if(dim(callExposures)[1]<1){stop("WARNING - You have no call exposure observations for the selected date range")}
+```
+
+Check for direct matches to the chosen top employer names and addresses that are being monitored.
+```{r employerMatch ## Samantha Lynn Bell DHD 2020 ##}
+
+# Write a function to find employer names in the desired field - This will be called from within another function
+match_employer_info <- function(emplr, em_data, fields){#takes in employer info to be matched, patient dataframe name, and column number for the raw data which is being checked for matching
+  rows <- c(1:dim(em_data)[1])
+  matched <- foreach(x = rows) %dopar% { #map over each row of the patient data in parallel, result is a list of TRUE/FALSE of length rows
+    allFields <- paste(em_data[x, fields]) # Concatenate the patient info from the selected fields, for one row (x) 
+    checkMatch <- grepl(emplr, allFields, ignore.case = TRUE) # match the employer name to all the pasted patient info: TRUE/FALSE 
+    TRUE %in% checkMatch # any TRUE values means the employer info was found in one of the patient fields and is a match
+  } 
+  return(matched)
+}
+
+# Write a function to find apply match_employer_info to various input data and fields(indices)
+runEmployerMatch <- function( desired_fields, inputData, EmployerREGEX_list, EmployerREGEX_list_addr){ 
+    n <- 1
+    employerFound <- ""
+    Top_Employer_Matches <- rep(NA, dim(inputData)[1])
+    Top_Employer_Matches2 <- rep(NA, dim(inputData)[1])
+
+    for(i in 1:length(EmployerREGEX_list)){ #Top employers list (will include repeats with variation in names)
+      m <- EmployerREGEX_list[i]
+      m2 <- EmployerREGEX_list_addr[i]
+      check <- which(unlist(match_employer_info(m, inputData, desired_fields)))
+      check2 <- which(unlist(match_employer_info(m2, inputData, desired_fields)))
+      together <- unique(c(check,check2))
+      employerFound[n] <- ifelse(!is.na(together[1]), list(together), "NA") # indices of the match are saved to the row # matching the employer name
+      n <- n+1
+      setTxtProgressBar(pb, i) # Update the progress bar
+    } 
+    for(j in 1:length(employerFound)){ # for result of the function having been run 
+      ind <- employerFound[[j]] # What were the matched indices
+      # If indices were captured, assign the name of the employer to the patient row where it matched - in a new column (otherwise NA)
+      if(ind[1]!="NA"){
+        # If the Top_Employer_Match variable already has a match assigned for this record, assign the match to Top_Employer_Match2
+        for(k in ind){
+          if(grepl("[[:alnum:]]", Top_Employer_Matches[k])){Top_Employer_Matches2[k] <- Employers$Employer_Factor[j]}
+          # Otherwise, assign the matched index employer factor to Top_Employer_Match
+          else{Top_Employer_Matches[ind]<- Employers$Employer_Factor[j]}
+        }
+      }
+      setTxtProgressBar(pb, i) # Update the progress bar
+    }
+    # Return 2 columns of matched employer factors, same row length as the data we are matching within
+  return(cbind(Top_Employer_Matches, Top_Employer_Matches2))
+}
+
+# which employer fields we want to search from patient data and call data
+patient_fields <-c("InvestigationID", "Worksites_School", "Occupations_Grade", "Name014", "Name","Name003", "Name000",
+                "Name004","If_yes__name_of_facility","If_yes__name_of_employer", "If_yes__name_of_employer000", "Occupation2",
+                "If_yes__please_specify_facili","Other___may_include_previousl","Location__address_or_best_des009","Comments_or_Additional_Inform",
+                "What_best_describes_where_the", "Street_Address001", "Street_Address002", "Street_Address003", "Street_Address004") 
+call_fields <- c("CALL.SUMMARY.-.FOLLOW.SCRIPT.DO.NOT.ASSUME", "Business/Organization.Name.and.Full.Address",
+                 "Follow-up.Comments.-.INCLUDE.DATE.AND.INITIALS","School/Business/Org.Name.and.Full.Address")
+exposure_fields <- c("Category.of.Exposure.Site", "Name.of.exposure.site,.gathering,.or.facility", "Full.Address", "Category.of.Exposure.Site.(#2)",
+                     "Name.of.exposure.site,.gathering,.or.facility.(#2)", "Full.Address.(#2)", "Category.of.Exposure.Site.(#3)", 
+                     "Name.of.exposure.site,.gathering,.or.facility.(#3)", "Full.Address.(#3)", "Category.of.Exposure.Site.(#4)", 
+                     "Name.of.Exposure.Site,.Gathering,.or.Facility.(#4)", "Full.Address.(#4)", "Relevant.Notes.for.Export")
+
+# Call the function for running employer match over each selection of fields and patterns to match (Name and Address matching for patient and call data)
+# The output is assigned to variables - matching the captured top employers to the related rows in the data itself
+
+patientOccupations <- cbind(patientOccupations, (suppressWarnings(runEmployerMatch(patient_fields, patientOccupations, Employers$Employer_Name_REGEX, Employers$Employer_Address_REGEX))))
+callOccupations <- cbind(callOccupations, (suppressWarnings(runEmployerMatch(call_fields, callOccupations, Employers$Employer_Name_REGEX, Employers$Employer_Address_REGEX))))
+callExposures <- cbind(callExposures, (suppressWarnings(runEmployerMatch(exposure_fields, callExposures, Employers$Employer_Name_REGEX, Employers$Employer_Address_REGEX))))
+
+
+# View results
+table(patientOccupations$Top_Employer_Matches, patientOccupations$Top_Employer_Matches2, useNA = "always")
+table(callOccupations$Top_Employer_Matches, callOccupations$Top_Employer_Matches2, useNA = "always")
+table(callExposures$Top_Employer_Matches, callExposures$Top_Employer_Matches2, useNA = "always")
+
+
+## View and save the MDSS counts to file
+# Make the table of Detroit vs other Jursidictions 
+top <- patientOccupations %>% mutate(Jurisdiction2 = case_when(
+  JURISDICTION=="Detroit City" ~ "Detroit City", 
+  TRUE ~ "Outside Detroit City")) %>% group_by(Jurisdiction2, Top_Employer_Matches, Top_Employer_Matches2) %>% summarise(n = n())
+# Carefully combine unique match1 and match2 into one summary table
+EmFound <- unique(c(top$Top_Employer_Matches, top$Top_Employer_Matches2))
+Detroit_City_count <-  rep(NA, length(EmFound))
+Outside_Detroit_count <-  rep(NA, length(EmFound))
+
+for(t in 1:length(EmFound)){
+  Em <- EmFound[t]
+  d <- 0
+  out <- 0
+  detSub <- top %>% filter( (Top_Employer_Matches==Em | Top_Employer_Matches2==Em) & Jurisdiction2=="Detroit City")
+  outSub <- top %>% filter( (Top_Employer_Matches==Em | Top_Employer_Matches2==Em) & Jurisdiction2!="Detroit City")
+  
+  d <- d + sum(detSub$n[detSub$Top_Employer_Matches==Em]) # Get the count of occurances in match1 field
+  for(s in 1:dim(detSub)[1]){
+    # If the match only appears in match2 and not match1, add a count
+    if(TRUE %in% (detSub$Top_Employer_Matches2[s]==Em & detSub$Top_Employer_Matches[s]!=Em)){d <- d+1} 
+  }
+  
+  out <- out + sum(outSub$n[outSub$Top_Employer_Matches==Em]) # Get the count of occurances in match1 field
+  for(s in 1:dim(detSub)[1]){
+    # If the match only appears in match2 and not match1, add a count
+    if(TRUE %in% (outSub$Top_Employer_Matches2[s]==Em & outSub$Top_Employer_Matches[s]!=Em)){out <- out+1} 
+  }
+  # Assign the count to the same index as the employer name
+  Detroit_City_count[t] <- d
+  Outside_Detroit_count[t] <- out
+}
+
+# Make into a final count table
+top2 <- as_tibble(cbind(Employer = EmFound, Detroit_City_count, Outside_Detroit_count, Total_count = Detroit_City_count+Outside_Detroit_count))
+
+write_xlsx(top2, paste0(location, "/", OutFolder, "/", "MDSS cases for monitored Detroit Employers.xlsx") )
+top
+top2
+```
+
+
+
+Check for top repeat terms within the occupation/employer fields
+```{r findTop ## Samantha Lynn Bell DHD 2020 ##}
+# Set up a function to take in bulk text, create a corpus frame, and identify top repeating terms
+Corpus_term_count <- function(inputText){
+  corpus.frame <- as_corpus_frame(inputText)
+  collapsedText <- paste(inputText$text, collapse = "/n")
+  TermCount <- corpus::term_counts(collapsedText, ngrams=2,
+                                   drop = c(stopwords_en, "#", "_x000d_", "`" ,"NA", "nNA", "%", "&", "na", "nna", "n", "y",
+                                            "unk", "nn", "ny", "mi", "nunk", "w", "e", "detroit", "blvd", "ave", "rd", "st","school", "none",  "declined", "unknown", "student", "grade", "university", "unemployed", "michigan", "retired", "virtual", "remote","primary_or_secondary_school_college_or_university","home","teacher","self","nunknown","nretired","refused","nunemployed","ndeclined"),
+                                   filter= c(text_filter(drop_punct = TRUE), text_filter(map_case = FALSE)), drop_number = TRUE) %>%
+    filter(count>1) %>% arrange(desc(count))
+  return(TermCount)
+}
+# Subset for employer name, employer addresses, and occupation free text
+patientEmployers_and_comments <- patientOccupations %>%
+  mutate(text = paste(Worksites_School, Occupations_Grade, Name014, Name, Name003, Name000, Occupation2, 
+                      If_yes__name_of_employer, If_yes__name_of_employer000, If_yes__name_of_facility, If_yes__please_specify_facili, 
+                      Street_Address001, Street_Address002, Street_Address003, Street_Address004, Location__address_or_best_des009, 
+                      Workplace_outside_of_home_oth, LTC_SNF_assisted_living_adult, Jail_prison_detention_center,
+                      Primary_or_secondary_school_C, Name009, Location__address_or_best_des009,Other___may_include_previousl)) %>%
+  select(InvestigationID, text)
+
+# Call the function for each patient data category and save the top terms (>2 mentions)
+MDSSTermCount <- Corpus_term_count(patientEmployers_and_comments)
+
+```
+
+Check for top repeat terms within the employer call log smartsheet employer location fields
+```{r findTop2 ## Samantha Lynn Bell DHD 2020 ##}
+# Set up a modified version of the corpus term function
+Corpus_term_count2 <- function(inputText){
+  corpus.frame <- as_corpus_frame(inputText)
+  collapsedText <- paste(inputText$text, collapse = "/n")
+  TermCount <- corpus::term_counts(collapsedText, ngrams=3,
+                                   drop = c(stopwords_en, "#", "_x000d_", "`" ,"NA", "nNA", "%", "&", "na", "nna", "n", "y",
+                                            "unk", "nn", "ny", "mi", "nunk", "w", "e", "detroit", "blvd", "ave", "rd", "st","school", "none",  "declined", "unknown", "student", "grade", "university", "unemployed", "michigan", "retired", "virtual", "remote"),
+                                   filter= c(text_filter(drop_punct = TRUE), text_filter(map_case = FALSE))) %>%
+    filter(count>1) %>% arrange(desc(term))
+  return(TermCount)
+}
+
+# Subset for employer name/address
+callEmployers <- callOccupations %>%
+  mutate(text = paste(`Business/Organization.Name.and.Full.Address`, `School/Business/Org.Name.and.Full.Address`)) %>%
+  select(text)
+  
+# Call the function for each dataset and save the top terms (>2 mentions)
+EmployerLocation <- Corpus_term_count2(callEmployers)
+```
+
+Write the count tables to file
+```{r writeCounts ## Samantha Lynn Bell DHD 2020 ##}
+write_xlsx(MDSSTermCount, paste0(location, "/", OutFolder, "/", "Top mentioned Exposure site Locations, Descriptions, and Comments- MDSS.xlsx") )
+write_xlsx(callExposures, paste0(location, "/", OutFolder, "/", "Top mentioned Exposure Call Log Source text.xlsx") )
+write_xlsx(EmployerLocation, paste0(location, "/", OutFolder, "/", "Top mentioned Employer Locations and Names from Employer Calls.xlsx") )
+```
+
+
+Flag the records with top terms by matching the top terms to their row indices in the original data. 
+Mark which top terms are found in which records - for each category: employer address, employer description, or comments
+```{r flagTerms # Samantha Lynn Bell DHD 2020 #}
+# Set up the function which will create flag fields to store the top terms from the corpus matching
+Tie_terms_to_records <- function(patientData, termCounts){
+  flagField1 <- rep("", dim(patientData)[1])
+  flagField2 <- rep("", dim(patientData)[1])
+  flagCount1 <- rep("", dim(patientData)[1])
+  flagCount2 <- rep("", dim(patientData)[1])
+  ids <- rep("", dim(patientData)[1])
+  for(i in length(termCounts$term):1){ # Run in reverse to get top count results as the one that is saved
+    # which row in patient data has the flagged term present? (fuzzy because of dropped characters when using corpus with conditions)
+    ind <- agrep(as.character(termCounts$term[i]), patientData$text, ignore.case = TRUE, max.distance = 0.05) 
+    for(j in 1:length(ind)){
+      if(j!=0 & !is_empty(ind)){
+        if(flagCount1[ind][j]!=""){# If we already saved a term to this record, use 2nd fields
+          flagField2[ind][j] <- as.character(termCounts$term[i])
+          flagCount2[ind][j] <- as.character(termCounts$count[i])
+        }else{# Otherwise, go ahead and save to the 1st fields
+          flagField1[ind][j] <- as.character(termCounts$term[i])
+          flagCount1[ind][j] <- as.character(termCounts$count[i])
+        }
+      }
+    }
+    if(i %% 100==0) {cat((i/length(termCounts$term))*100, "% remaining...")} # print progress every 20 iterations
+  }
+  return(cbind(flagField1, flagCount1, flagField2, flagCount2))
+}
+
+# For the patient data, make and bind new columns with flagged terms
+newColumns <- cbind(Tie_terms_to_records(patientEmployers_and_comments , MDSSTermCount))
+
+colnames(newColumns) <- c("flagged_MDSS", "flagged_MDSS_count", "flagged_MDSS2", "flagged_MDSS_count2")
+
+patientOccupations <- cbind(patientOccupations, newColumns)
+# For the two smartsheets, make and bind the new columns with flagged terms
+Flagged_Exposures <- Tie_terms_to_records(callLogExposure, callExposuresCount)
+callExposures <- cbind(callExposures, Flagged_Exposures)
+
+Flagged_Calls <- Tie_terms_to_records(callEmployers,EmployerLocation)
+callEmployers <- cbind(callEmployers, Flagged_Calls)
+```
+
+
+Add looking for specific free text "birthday party", "Funeral" etc
+```{r specificText  # Samantha Lynn Bell DHD 2020 #}
+# Create a variable with concatenated places patient may have spent time
+patientOccupations <- patientOccupations %>% mutate(
+  Concatenated_Text = paste(Name,Name003,Name009,Location__address_or_best_des009,Other___may_include_previousl,
+                            Comments_or_Additional_Inform, What_best_describes_where_the, Occupation2,
+                            Worksites_School, Name003,Comments_or_Additional_Inform, Outbreak_Name,
+                            Occupations_Grade,If_checked__outbreak_name_or_, JURISDICTION))
+
+# Create function to match entry text to the patient data field selected, return list of TRUE/FALSE the same length as the entry field
+match_text <- function(text){
+  grepl(text, patientOccupations$Concatenated_Text, ignore.case = TRUE)
+}
+
+# Apply the function to all rows of the data and save the results for each search text
+Birthday_Party <- lapply(X="Birthday.{0,2}Party{0,1}", FUN=match_text)
+table(Birthday_Party) # See results
+
+Funeral <- lapply(X="funeral", FUN=match_text)
+table(Funeral)
+
+Wedding <- lapply(X="wedding", FUN=match_text)
+table(Wedding) 
+  
+Party <- lapply(X="party", FUN=match_text)
+table(Party) 
+
+Reunion <- lapply(X="Reunion|re-union", FUN=match_text)
+table(Reunion) 
+  
+Baby_Shower_Gender <- lapply(X="baby.{0,1}shower|gender reveal", FUN=match_text)
+table(Baby_Shower_Gender) 
+  
+Bridal_Shower_or_Bachelor <- lapply(X="bridal.{0,1}shower|bachelor.{0,6}party", FUN=match_text)
+table(Bridal_Shower_or_Bachelor) 
+  
+Anniversary <- lapply(X="annivers", FUN=match_text)
+table(Anniversary) 
+  
+Church <-lapply(X="Church|worship|bible study", FUN=match_text)
+table(Church) 
+  
+Pool <- lapply(X="pool", FUN=match_text)
+table(Pool) 
+  
+Works_in_Detroit_Unspecified <- lapply(X="work.{0,8}detroit|office in detroit|work.{0,5}downtown", FUN=match_text)
+table(Works_in_Detroit_Unspecified) 
+
+Student_Teacher <- lapply(X="college|frat|sorority|dorm|student|elementary|academ|teach|grade|professor|coach", FUN=match_text) # makes use of the occupation2 STUDENT indicator as part of the match
+table(Student_Teacher) 
+  
+Casinos <- lapply(X="casin|greek.{0,2}town|motor.{0,2}city|mgm|1777 th|1777 3rd|2901.{0,2}grandr|2901.{0,2}grand r|555.{0,5}Lafayette|gambling|slot machine", FUN=match_text)
+table(Casinos) 
+
+NonDetroitCasino <- lapply(X="soar(ing)? eagle|turt(le)? creek|turtlecreek|caesar.{0,3}windsor|ceasar.{0,3}windsor|windsor casino|odawa cas|turning stone|fire keeper|firekeeper|standish casino|saganing eagle|eagle(s)? landing|Saganing|han(n)?aville casino|hollywood casino|gun lake|four wind(s)?|brimley|las vegas|lasvegas", FUN=match_text)
+table(NonDetroitCasino)
+
+DayCare <- lapply(X="day.?care|child.?care|nursery.?school|day nursery|pre.?school|playschool", FUN=match_text)
+table(DayCare)
+
+Homeless <- grepl(
+  "hom(e)?less|shelter|homelessshelter|transitional|transitionalhousing|shelter,oth|shelters|3535.{0,4}3RD|3535.{0,4}THIRD|3840.{0,4}Fairv|12900.{0,4}W|
+  12900.{0,2}(w|e|n|s)?.{0,4}GRAND|13130.{0,4}Woodw|211.{0,4}Glend|13320.{0,4}Woodw|11037.{0,4}(w|e|n|s)?.{0,4}Mack|1331.{0,4}CANF|
+  1101.{0,4} WARREN|3972.{0,4}MIRAC|1942.{0,4}25|3701.{0,4}MIRAC|11850.{0,4} WOODR|1584.{0,4}ELMHURST|3901.{0,4}Cass|11745.{0,4}Rosa|
+  445.{0,4}LEDYARD|3430.{0,4}3RD|3430.{0,4}THIRD|882.{0,4}Oakman|8431.{0,4}Rosa|12260.{0,4}CAMDEN|4626.{0,4}(w|e|n|s)?.{0,4}GRAND|10100.{0,4}HARPER|
+  6221.{0,4}BRUSH|3737.{0,4}Lawton|3737.{0,4}Humboldt|1627.{0,4}F(OR)?T|1777.{0,4}(w|e|n|s)?.{0,4}RAD|11801.{0,4}Woodrow|8801.{0,4}(w|e|n|s)?.{0,4}Woodw|
+  16630.{0,4}Wyomin|5470.{0,4} Chene|8520.{0,4}Wyomin|26.{0,4}Peterboro|220.{0,4}Bagley|2111.{0,4}(w|e|n|s)?.{0,4}Woodw|10.{0,4}Peterboro|
+  7301.{0,4}(w|e|n|s)?.{0,4}Woodw|903.{0,4}W|903.{0,4}West|19750.{0,4}Burt| 24424.{0,4}W|12249.{0,4}Camden|14750.{0,4}S(ain)?t.{0,4} Mary(.)?s|
+  665.{0,4}(w|e|n|s)?.{0,4}GRAND|2459.{0,4}Parker|686.{0,4}(w|e|n|s)?.{0,4}GRAND|4875.{0,4}Coplin|3737.{0,4}Lawton|65.{0,4}Cadillac|
+  3031.{0,4}(w|e|n|s)?.{0,4}GRAND|7301.{0,4}Woodw|253.{0,4}E.{0,4}Milwaukee|23.{0,4}E.{0,4}Adams|3646.{0,4}Mt.{0,4}Elliott|14320.{0,4}Kercheval|
+  1600.{0,4}Porter|7301.{0,4}Woodw|2959.{0,4}Martin|2424.{0,4}(w|e|n|s)?.{0,4}GRAND|9851.{0,4}Hamilton|1600{0,4}Blaine|OUTSIDENONPERMANENTLOCATION",
+                  patientOccupations$Concatenated_Text, ignore.case = TRUE) & 
+  (!grepl("shelter.{0,7}in (plac|pace)|work.{0,20}shelter|provid.{0,13} to.{0,10} homeless|provid.{0,13} to.{0,7} shelter|serv.{0,20}(to|in|the)?.{0,10} homeless",
+          patientOccupations$Concatenated_Text, ignore.case = TRUE))
+table(Homeless) 
+
+# Gather new column names for the additional flags, and combine the TRUE FALSE lists to the occupation data
+newcolnames <- c(colnames(patientOccupations), "Birthday_Party", "Funeral", "Wedding", "Party", "Reunion", "Baby_Shower", "Bridal_Shower_or_Bachelor", "Anniversary", "Church", "Pool", "Works_in_Detroit_Unspecified", "Student_Teacher", "Casinos", "Non-Detroit Casinos", "Daycare", "Homeless")
+patientOccupations <- cbind(patientOccupations, Birthday_Party, Funeral, Wedding, Party, Reunion, Baby_Shower_Gender, Bridal_Shower_or_Bachelor, Anniversary, Church, Pool, Works_in_Detroit_Unspecified, Student_Teacher, Casinos, NonDetroitCasino, DayCare, Homeless)
+colnames(patientOccupations) <- newcolnames # Apply new column names
+
+
+```
+STUDENT/TEACHER REPORT
+
+Use list of Detroit Schools and Daycare locations to run match against the patient MDSS records
+```{r JB March 2021}
+# Set up subset with potential school-related info (uses previous patient fields list)
+schoolRecords <- patientOccupations %>% select(JURISDICTION, Referral_Date, Case_Status, Student_Teacher, Daycare, eval(patient_fields)) 
+schoolRecords$allFields <- apply(schoolRecords[,6:dim(schoolRecords)[2]], 1, paste, collapse=" ") # Make new field will all text in one cell - columns 6+
+  
+# Write a function to find school names in the desired fields - this will be called from within another function
+match_school_info <- function(school, sch_data){#takes in school info to be matched, patient dataframe name, and column number for the raw data which is being checked for matching
+  rows <- c(1:dim(sch_data)[1])
+  checkMatch <- sapply(rows, function(r){str_extract(tolower(sch_data$allFields[r]), tolower(school))}) # match the school name to all the pasted patient info: returns the matched text or NA
+  return(checkMatch)  
+}
+
+# Write a function to find apply match_school_info to various input data and fields(indices)
+runSchoolMatch <- function(inputData, SchoolREGEX_list){ 
+    n <- 1
+    schoolFound <- ""
+    schoolFoundInd <- ""
+    School_Matches <- rep(NA, dim(inputData)[1])
+    School_Matched_Text <- rep(NA, dim(inputData)[1])
+    cat("Finding matches", "\n")
+    for(i in 1:length(SchoolREGEX_list)){ #Top schools list (will include repeats with variation in names)
+      m <- SchoolREGEX_list[i]
+      check <- (match_school_info(m, inputData))
+      schoolFoundInd[n] <- ifelse(length(which(!is.na(check)))>0, which(!is.na(check)), NA) # indices of the match are saved to the row # matching the school name
+      schoolFound[n] <- ifelse(length(which(!is.na(check)))>0, check[!is.na(check)], NA) # save the matched text
+      n <- n+1
+      setTxtProgressBar(pb, i) # Update the progress bar
+    } 
+    cat("\n", "Processing matches", "\n")
+    for(j in 1:length(schoolFoundInd)){ # for result of the function having been run 
+      ind <- as.numeric(schoolFoundInd[[j]]) # What were the matched indices
+      # If indices were captured:
+        # assign the name of the school to the patient row where it matched - in a new column (otherwise NA)
+        # assign the text that made the match happen - in a new column (otherwise NA)
+      if(!is.na(ind[1])){
+        School_Matches[ind]<- Schools$School[j]
+        School_Matched_Text[ind] <- schoolFound[[j]]
+      }
+      setTxtProgressBar(pb, j) # Update the progress bar
+    }
+    # Return 2 columns of matched school factors, same row length as the data we are matching within
+  return(cbind(School_Matches, School_Matched_Text))
+}
+
+# Run the functions and bind the new columns to the school data
+schoolRecords <- cbind(schoolRecords, (suppressWarnings(runSchoolMatch(schoolRecords, Schools$REGEX))))
+
+# Make a subset of matched school records 
+schoolsOnly <- schoolRecords %>% filter((!is.na(School_Matches))) 
+# Subset of records matched as school-related in some way but are missing school location or grade (for operations)
+schoolsOnly_missingInfo <- schoolsOnly %>% filter(is.na(Worksites_School)|is.na(Occupations_Grade)) %>% filter(JURISDICTION == "Detroit City") %>%
+  select(JURISDICTION, InvestigationID, School_Matches, School_Matched_Text, Worksites_School, Occupations_Grade, Daycare, Student_Teacher)
+# Table of results
+#schoolTable <- schoolsOnly %>% group_by(JURISDICTION, School_Matches) %>% summarise(n=n())
+
+#table of all school cases
+AllSchools <- patientOccupations %>% filter(Student_Teacher == TRUE|Daycare==TRUE) %>% 
+group_by(JURISDICTION) %>% summarise('All School Cases'=n())
+
+# Table of results for Detroit schools JB
+Detroit_School <- schoolsOnly %>% filter(!is.na(School_Matches)) %>% group_by(School_Matches) %>% summarise('Detroit School Cases'=n())
+
+#Detroit schools by jurisdiction JB
+Detroit_School_Jurisdiction <- schoolsOnly %>% filter(!is.na(School_Matches)) %>% group_by(JURISDICTION) %>% summarise('Detroit School Cases'=n())
+
+schoolTable <- merge(AllSchools,Detroit_School_Jurisdiction,by="JURISDICTION", all=T)
+
+#select variables for cleaned output
+SchoolsOnly_Clean <- schoolsOnly %>% select(InvestigationID,Case_Status,Referral_Date,JURISDICTION,School_Matches,Worksites_School,Occupation2,Daycare,Comments_or_Additional_Inform)
+
+dataset_List <- list("School Line List"= schoolsOnly, "School Summary"=Detroit_School)
+
+dataset_List_Clean <- list("School Line List"= SchoolsOnly_Clean, "School Summary"=Detroit_School)
+
+#Reorder columns JB
+schoolsOnly <- schoolsOnly %>% select("InvestigationID", "Referral_Date", "Case_Status","JURISDICTION", "School_Matched_Text", "School_Matches", "Occupations_Grade",everything())
+
+
+schoolsOnly_Clean$Referral_Date <- as_date(SchoolsOnly_Clean$Referral_Date)
+
+# Save the files
+write_xlsx(dataset_List_Clean, paste0(location, "/", OutFolder, "/", "Cases matched to Detroit schools_Clean.xlsx"))
+write_xlsx(dataset_List, paste0(location, "/", OutFolder, "/", "Cases matched to Detroit schools.xlsx"))
+write_xlsx(schoolsOnly_missingInfo, paste0(location, "/", OutFolder, "/", "Detroit jurisdiction school cases missing info.xlsx"))
+write_xlsx(schoolTable, paste0(location, "/", OutFolder, "/", "Summary Table of School Cases.xlsx"))
+```
+
+
+CASINO SUBSET
+```{r}
+#Filter if casinos or Nondetroit is True
+detroitcasino <- patientOccupations %>% filter(Casinos==TRUE|`Non-Detroit Casinos`==TRUE)
+
+detroitcasino <- select(detroitcasino, InvestigationID,JURISDICTION,
+                        Name,Name003,Name009,Location__address_or_best_des009,Other___may_include_previousl,
+                        Comments_or_Additional_Inform, What_best_describes_where_the,
+                        Worksites_School, Name003,Comments_or_Additional_Inform, Outbreak_Name,
+                        Occupations_Grade,If_checked__outbreak_name_or_, If_yes__name_of_employer, 
+                        If_yes__name_of_employer000)
+
+#Export for manual review
+write.xlsx(detroitcasino, paste0(location2, "/", Sys.Date(), file="_Casino_related.xlsx"))
+```
+
+AGGREGATE OUTBREAKS
+what outbreaks are in the current data that are also in the aggregate Detroit City list of outbreaks? 
+```{r aggregagtes  # Samantha Lynn Bell DHD 2020 #}
+#remove canceled and Superseded outbreaks
+aggregate <- aggregate %>% filter(!Investigation_Status %in% c("Canceled", "Superceded") )
+
+#list all aggregate report outbreak names
+agg_ob <- unique(aggregate$Outbreak_Name)
+
+#list unique outbreak names out from our current Southeast Michigan data
+michigan_ob <- unique(subsetPatients$Outbreak_Name[subsetPatients$Outbreak_Name!="NA" & !is.na(subsetPatients$Outbreak_Name)])
+
+# For each unique outbreak name in the aggregate outbreak data, see if it occurs in the subset patient outbreaks list
+  # If so, save the indices for that outbreak name
+    # Indices saved are the location within the subset patient unique outbreak list to which a fuzzy match was successful
+found <- ""
+n <- 1
+for(i in agg_ob){
+  #if a fuzzy match is found (length of find is >0), save indice, else ""
+  found[i] <- ifelse(length(agrep(i, michigan_ob, ignore.case=TRUE, max.dist=0.07))>0, agrep(i, michigan_ob, ignore.case=TRUE, max.dist=0.07), "") 
+  n <- n+1
+  }
+aggMatchIndices <- as.numeric(unique(found)) # Turn the captured matched indices into numbers
+michiganInAgg <- michigan_ob[aggMatchIndices] # Use the numbers to save the names of each matched aggregate outbreak name from the patient unique outbreak list
+michiganInAgg 
+
+# Which rows in the patient data have these aggregate outbreaks listed?
+patientsWithAggOutbreaks <- which(subsetPatients$Outbreak_Name %in% michiganInAgg)
+# Summarize the number of records for each of the aggregate outbreak names within the subset patient data
+michiganInAgg2 <- subsetPatients[patientsWithAggOutbreaks, ] %>% group_by(Outbreak_Name) %>% summarise(n=n())
+write_xlsx(michiganInAgg2, paste0(location, "/", OutFolder, "/", "Ongoing Outbreaks Matched to Aggregate List.xlsx"))
+
+
+#Archive dated aggregated file
+write_xlsx(aggregate, paste0(location, "/Archive-- Aggregate/", Sys.Date(), "_aggregate.xlsx"))
+```
+
+
+CLEAN UP OUTBREAK IDs FOR EXPORT
+```{r printOutbreaks ## Samantha Lynn Bell DHD 2020 ##}
+outbreakIds <- patientOccupations %>% group_by(Outbreak_Name) %>% summarise(count = n())
+outbreakIds
+write_xlsx(outbreakIds, paste0(location, "/", OutFolder, "/", "Number of selected records by outbreak name.xlsx"))
+
+outbreakIdsByPatient <- patientOccupations %>% group_by(Outbreak_Name, InvestigationID) %>% summarise()
+write_xlsx(outbreakIdsByPatient, paste0(location, "/", OutFolder, "/", "Known outbreak names associated with selected cases.xlsx"))
+```
+
+CLEAN UP THE CALL DATA FOR EXPORT
+```{r  # Samantha Lynn Bell DHD 2020 #}
+# File any rows that have a flagged record from one of the ways listed above. 
+calls_with_flags <- callOccupations %>% filter(Top_Employer_Matches!=" "|Top_Employer_Matches2!=" ") 
+calls_exposures_with_flags <- callExposures %>% filter(Top_Employer_Matches!=" "|Top_Employer_Matches2!=" "|flagCount1!=" "|flagCount2!=" "|flagField1!=" "|flagField2!=" ") 
+```
+
+
+WRITE PATIENT AND CALL DATA WITH ADDED FLAGS
+```{r writeOutput}
+write_xlsx(patientOccupations, paste0(location, "/", OutFolder, "/", "All_Flagged_Occupations_Employers.xlsx") )
+
+write_xlsx(calls_with_flags, paste0(location, "/", OutFolder, "/", "Flagged_Occupations_From_Call_Log.xlsx") )
+
+write_xlsx(callExposures, paste0(location, "/", OutFolder, "/", "Flagged_Exposures_From_Call_Log.xlsx") )
+
+write_xlsx(callEmployers, paste0(location, "/", OutFolder, "/", "Flagged_Employers_From_Call_Log.xlsx") )
+```
+
+Clean files to for export to share with investigations
+```{r Jamie Bivins February 2021}
+patientOccupations_clean <- patientOccupations[!is.na(patientOccupations$Top_Employer_Matches)| !is.na(patientOccupations$Top_Employer_Matches2), ]
+
+patientOccupations_clean <- patientOccupations_clean %>% select(InvestigationID, Case_Status,Referral_Date, Street_Address001, Street_Address002, Street_Address003, Street_Address004, Worksites_School, Occupations_Grade, Occupation2, Workplace_outside_of_home_oth, Name014, If_yes__name_of_employer000, If_yes__please_specify_facili, Comments_or_Additional_Inform, Outbreak_Name, If_checked__outbreak_name_or_, JURISDICTION, flagged_MDSS, flagged_MDSS2, Top_Employer_Matches, Top_Employer_Matches2) %>% arrange(InvestigationID)
+
+Flagged_Student_Clean <- schoolsOnly %>% filter(JURISDICTION=="Detroit City")
+
+write_xlsx(Flagged_Student_Clean , paste0(location, "/", OutFolder, "/", "Flagged_Student_Teacher_Detroit City.xlsx") )
+
+write_xlsx(patientOccupations_clean , paste0(location, "/", OutFolder, "/", "All_Flagged_Occupations_Employers_Clean.xlsx") )
+```
+
+Analyze standard exposure sites and summarize in a table
+```{r exposure summaries -- KSS 2/2021}
+#select the columns of intetest for exposure sites
+patientOccupations_Exposure <- patientOccupations %>% select(InvestigationID,JURISDICTION, Birthday_Party, Funeral, Wedding, Party, Reunion, Baby_Shower, 
+                                                        Bridal_Shower_or_Bachelor, Anniversary, Church, Pool, Daycare, Homeless)
+
+#convert the data from wide to long
+patientOccupations_Exposure  <- melt(patientOccupations_Exposure , id=c("InvestigationID","JURISDICTION"))
+
+#Filter for flagged cases for any of these exposure sites
+patientOccupations_Exposure <- patientOccupations_Exposure %>% filter(value == TRUE)
+
+#New dataframe for all jurisdictions
+patientOccupations_ExposureAll <- patientOccupations_Exposure 
+patientOccupations_ExposureAll$JURISDICTION <- "All jurisdictions"
+
+#Subset data for Detroit cases
+patientOccupations_ExposureDetroit <- patientOccupations_Exposure %>% filter(JURISDICTION == "Detroit City")
+
+#Summarize counts by exposure site for all cases and for Detroit and then combine in a table
+Exposures_all <- patientOccupations_ExposureAll %>% group_by(variable) %>% summarise(All=n())
+Exposures_Detroit <- patientOccupations_ExposureDetroit %>% group_by(variable) %>% summarise(Detroit=n())
+Exposures_table <- merge(Exposures_all,Exposures_Detroit, by = "variable", all.x = TRUE )
+
+#write excel file
+list_of_datasets <- list("Summary" = Exposures_table,"Detroit_Cases" = patientOccupations_Exposure)
+write.xlsx(list_of_datasets, file = paste0(location, "/", OutFolder, "/", "MDSS Standard exposure summary.xlsx"))
+```
+
+```{r}
+# Stop the clock
+proc.time() - ptm
+```
