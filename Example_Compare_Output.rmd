@@ -1,0 +1,61 @@
+---
+title: "Comparing_Output"
+author: "Samantha L Bell"
+date: "5/17/2021"
+output: pdf_document
+---
+load packages
+```{r}
+library(tidyverse)
+library(dplyr)
+```
+
+Load the data of chicken weights (2 dataframes)
+```{r}
+data(ChickWeight)
+summary(ChickWeight)
+```
+
+Make a summary of records in each time category - two different ways
+```{r}
+# 1
+byTime1 <- ChickWeight %>% group_by(Time) %>% summarise(Number_of_chicks=n()) %>%
+  mutate(Time = as.character(Time))
+
+# 2
+byTime2 <- tibble( # Set up tibble
+  Number_of_chicks = 0,
+  Time = as.factor(unique(ChickWeight$Time))
+)
+for(i in 1:dim(byTime2)[1]){ # Add the count 
+  T <- byTime2$Time[i]
+  byTime2$Number_of_chicks[i] <- as.numeric(dim(ChickWeight[ChickWeight$Time==T,])[1])
+}
+```
+
+Check for differences
+```{r}
+all_equal(byTime1, byTime2)
+
+# Does it matter what order the columns appear in?
+all_equal(byTime1, byTime2, convert = TRUE, ignore_col_order = FALSE)
+
+# What if we convert the column types automatically?
+all_equal(byTime1, byTime2, convert = TRUE)
+```
+
+What if there is an incorrect number?
+```{r}
+byTime2$Number_of_chicks[3] <- 77 # Change one number
+all_equal(byTime1, byTime2, convert = TRUE) # see which row has the difference
+```
+
+What if there is an extra column?
+```{r}
+byTime2$Pairs_of_chicks <- byTime2$Number_of_chicks/2 # add a column
+all_equal(byTime1, byTime2, convert = TRUE) # Find out that the number of columns is different
+
+byTime2$Number_of_chicks <- NULL # remove a column
+all_equal(byTime1, byTime2, convert = TRUE) # Find out that the column names do not match
+```
+

@@ -1,0 +1,57 @@
+
+No progress indicator
+```{r}
+m <- 1:150 # Possible lengths the data might have
+data <- matrix(rnorm(sample(m, 1), 1, .5)) # Random data matrix
+
+for(i in 1:dim(data)[1]){
+  Sys.sleep(0.2) # the action
+}
+```
+
+cat progress
+```{r}
+m <- 1:150 # Possible lengths the data might have
+data <- matrix(rnorm(sample(m, 1), 1, .5)) # Random data matrix
+
+for(i in 1:dim(data)[1]){
+  cat("Now working on", i, ".") # Print the iteration number
+  for(j in 1:10){
+    Sys.sleep(0.2) # the action
+    cat(".") # Print a dot each iteration in the j loop (will be multiple for each i)
+  }
+}
+```
+
+cat progress with modulus
+```{r}
+m <- 1:150 # Possible lengths the data might have
+data <- matrix(rnorm(sample(m, 1), 1, .5)) # Random data matrix
+
+for(i in 1:dim(data)[1]){
+  if(i %% 10==0) {cat(round((i/dim(data)[1])*100, digits=0), "% completed...")} # print progress every 5 iterations
+  Sys.sleep(0.2) # the action
+}
+cat("Done!")
+```
+
+Progress bar with modulus
+```{r}
+m <- 1:150 # Possible lengths the data might have
+data <- matrix(rnorm(sample(m, 1), 1, .5)) # Random data matrix
+
+# Number of iterations
+imax<-c(10)
+# Initiate the bar
+bar <- txtProgressBar(min = 0, max = 10, style = 3)
+
+for(i in 1:dim(data)[1]){
+  Sys.sleep(0.5) # the action
+   # Update the progress bar
+   setTxtProgressBar(bar, i)
+}
+```
+
+
+
+

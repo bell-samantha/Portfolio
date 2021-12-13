@@ -1,0 +1,180 @@
+This tutorial shows some ways to use REGEX patterns in your code. 
+Go to https://www.rdocumentation.org/packages/base/versions/3.6.2 to search the documentation of each function in more detail
+
+** Samantha L. Bell, 2021, Detroit Health Department **
+
+```{r}
+library(stringr)
+library(gsubfn)
+library(readxl)
+```
+
+Load the data
+```{r}
+dat <- read_excel("//codasfswvp30/health$/bells/Desktop/REGEX Training/Sample Data REGEX 2.xlsx")
+```
+
+
+Clean up the phone numbers using some REGEX and 2 functions:
+  strapply(data, pattern, FUN, options)
+  gsub(pattern, replacement, data)
+  
+The patterns we will use for this section:
+  "^(\\d\\D{1,2})?(.?\\d{3})\\D{1,2}(\\d{3})\\D(\\d{4})“
+  ^ anchors the beginning of the pattern. Nothing can come before our pattern in any string that matches. 
+  \\d stands for a digit (0-9)
+  \\D stands for NON-digit (not 0-9)
+  {1,2} indicates the number of times the previous thing or group can occur
+  ? says “maybe present”
+  . stands for any character except newline
+  () parentheses create capture groups – in this case one for each section of the phone number
+    (country code) – (area code) – (prefix) – (line number)
+    - Notice that the first \\D{1,2} is contained within the parentheses, and the others are between. Why?
+    (The entire first part of the pattern up until the area code needs to be optional)
+
+  “\\D” is one NON-digit
+
+  “\\d.+” is a digit, followed by any character except newline at least one time (+ says “at least once”)
+
+```{r}
+# grab our phone numbers to work with them separately:
+x <- as_tibble(dat$Patient_Phone)
+
+pat1 <- "^(\\d\\D{1,2})?(.?\\d{3})\\D{1,2}(\\d{3})\\D(\\d{4})"
+
+# Apply grouping to the phone number column by using strapply and a pattern with captured parentheses groups
+  # Note the optional 1st group - which accounts for possible leading country code
+  # Result is a list of character vectors, each one split phone number
+  # The returned items are only what matched inside our capture groups!
+    # anything matched to the pattern in between the groups is not returned (space, dash, etc) 
+    # You will see other punctuation with the country code group – remember how we included it all inside the 1st capture group?)
+  # Use the c option to concatentate the result into one vector and include all results
+x$split <- strapply(x$value , pat1, c)
+x$split
+
+#The same code when not made into a column returns a list of character vectors
+strapply(x$value , pat1, c)
+
+# What happens if we don't use "c"?
+strapply(x$value , pat1) # only gives the first group
+# What happens if we make each result a list?
+strapply(x$value, pat1, list) # nested lists of characters within a list
+# What happens if we show the names?
+strapply(x$value, pat1, c, USE.NAMES = TRUE) # shows what each result came from. Names can be called up later using $ 
+
+# Wrap the split phone number in unlist to unlist them, and remove all but the digits using gsub
+x$simple <- unlist(gsub("\\D", "", x$split))
+x$simple
+
+# If there is a leading country code, remove it
+  # apply the function to all rows with digits in them (not NA or empty or text)
+  # wrap in paste to get a nice character vector (not a list)
+x$clipped <- paste(strapply(x$simple, "\\d.+", function(phone){gsub("^1", "", phone)}))
+x$clipped
+
+# Replace the original phone number column with our new one
+dat$Patient_Phone <- x$clipped
+dat
+```
+
+Flag Lyme Disease
+  grepl(pattern, data, options)
+```{r}
+# grepl will give us a vector of TRUE / FALSE results to a match - the same length as the entry data
+grepl("lyme", dat$Test_Name, ignore.case = TRUE)
+
+# We can use mutate to make a new column
+dat <- dat %>% mutate(
+  Lyme_tested = case_when( grepl("lyme", dat$Test_Name, ignore.case = TRUE) ~ "Y", 
+                           TRUE ~ "N")
+)
+
+# Or make a new column directly of the TRUE / FALSE
+dat$Lyme_tested <- grepl("lyme", dat$Test_Name, ignore.case = TRUE) 
+
+# Or use ifelse to make the column, with grepl as the test
+dat$Lyme_tested <- ifelse( grepl("lyme", dat$Test_Name, ignore.case = TRUE), "Y", "N") 
+
+```
+
+Flag Anaplasmosis
+  str_detect(string, pattern, options)
+```{r}
+# Get a vector of TRUE / FALSE matches to anaplasmosis in the test names - the same length as the entry data
+  # There is no ignore.case option, so we can match using tolower() as a wrapper for our text
+str_detect(tolower(dat$Test_Name), "anaplas")
+
+# Using the negate option will give those that DO NOT match
+str_detect(tolower(dat$Test_Name), "anaplas", negate = TRUE)
+
+# Add a column
+dat <- dat %>% mutate(
+   Anaplasma_tested = case_when(
+      str_detect(tolower(dat$Test_Name), "anaplas") ~ "Y", 
+      TRUE ~ "N")
+)
+
+```
+
+
+Pull out the names of certain antibiotics
+  str_match(data, pattern)
+```{r}
+# The result of str_match is a character matrix. First column is the complete match, followed by one column for each capture group. 
+antibiotics <- str_match(tolower(dat$Rx_Given), "(doxycycline)|(amoxicillin)|(tetracycline)")
+antibiotics
+
+# Use the first column of the matrix ( all results ) to make a new column
+dat$Antibiotic_Rx <- antibiotics[,1]
+```
+
+
+Create a subset of Dr. Brewster's patients
+```{r}
+brewster_indices <- grep("brewster", dat$Doctor, ignore.case = TRUE)
+Brewster_cases <- dat[brewster_indices,]
+```
+
+
+Make a table of clean test results for a patient
+  str_split(data, pattern, options)
+```{r}
+# Splitting over all rows of a field give a list of character vectors
+str_split(dat$Test_Name, "/")
+
+# Using the simplify = TRUE option gives this in a nicer table form
+str_split(dat$Test_Name, "/", simplify = TRUE)
+
+# Split the test name and result fields for patient 2 (gives one listed character vector at index [[1]])
+Test_Name <- str_split(dat$Test_Name[2], "/")[[1]]
+Test_Results <- str_split(dat$Test_Result[2], ":")[[1]]
+Test_Name 
+Test_Results
+
+# To use simplify = TRUE, you would index using [1,] for the row number you are calling
+Test_Name <- str_split(dat$Test_Name[2], "/", simplify = TRUE)[1,]
+Test_Results <- str_split(dat$Test_Result[2], ":", simplify = TRUE)[1,]
+Test_Name 
+Test_Results
+
+# Create a table for this patient's tests
+Patient2_Tests <- as_tibble(data.frame(Test_Name, Test_Results))
+```
+
+Clean up the patient sex column so that the format is consistent
+  gsub(pattern, replacement)
+```{r}
+# substitute male and female in the patient sex column
+  # Note the anchor for the M in male, so that second half of the word female is not matched 
+  # Note that the parentheses make a capture group for the latter part of the words, allowing for the ? to make them optional. 
+dat$Patient_Sex <- gsub("^m(ale)?", "M", dat$Patient_Sex, ignore.case = TRUE)
+dat$Patient_Sex <- gsub("f(emale)?", "F", dat$Patient_Sex, ignore.case = TRUE)
+```
+
+
+
+
+
+
+
+

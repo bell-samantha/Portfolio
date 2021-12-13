@@ -1,0 +1,165 @@
+---
+title: "Stringr Tips"
+author: "Samantha L Bell"
+date: "12/3/2020"
+output: html_document
+---
+
+Manipulating strings and pulling patterns of text is a frequent coding task, and can be a challenge. Among the many packages available for manipulating strings is the "stringr" package. Today's tip dives into some of the functions stringr has to offer:
+
+1) str_locate - identifying the start and end character indices of your search text
+2) word - pulling entire words based on their index or range of indices. "Words" are defined by a separator (default is a single space)
+3) str_split - separating a string into a list, using a provided separator
+4) str_extract - print matched text from a string
+
+Also touched on is the use of the collapse option from paste() - allowing for quick creation of long strings with separator text. 
+
+Ready! Set! Go! 
+
+
+Load our stringr package (install if needed)
+```{r loadPackages}
+library(stringr)
+```
+
+_____________________________________________________________________________________________________________________
+First, let's try to locate a string of text within some sentences. 
+
+#str_locate will provide us with the start and end indices of our desired search text
+  The function runs as str_locate(string, pattern), and will give the location of matched text within the string.
+  To ignore the case of the text, wrap the pattern in regex() and use ignore.case = TRUE
+```{r locateString}
+exampleSong <- "All God's creatures got a place in the choir. Some sing low and some sing higher. Some sing out loud on a telephone wire. Some just clap their hands, or paws, or anything they've got now."
+
+toMatch <- "some sing"
+
+str_locate(exampleSong, toMatch) # Find the FIRST location, NOT ignoring case
+str_locate(exampleSong, regex(toMatch, ignore_case = TRUE) ) # Find the FIRST location, IGNORING case
+str_locate_all(exampleSong, regex(toMatch, ignore_case = TRUE) ) # Find ALL locations, IGNORING case
+
+```
+_____________________________________________________________________________________________________________________
+What if we wanted to do the opposite, and capture a word or words based on their positions?
+
+# word() will let us pull from a string based on a set position or range, with the ability to specify the separator as well
+To see how this works, let's first use our example song text again.
+  We can pull specific words using those positions and word(string, start, end, sep)
+  When not provided, the separator is assumed to be a single space: " "
+```{r word}
+# Pull the first instance of "some sing"
+word(exampleSong, start = 10, end = 11) # Notice that this function counts by WORD, not CHARACTER
+
+# You can simplify the command if only providing the start position 
+word(exampleSong, 16) # Pull the 16th word
+
+# A negative number will allow you to count backwards
+word(exampleSong, start = -6, end = -1) # Pull from the end of the string
+```
+
+Now that we have an understanding of how this works, we can take a look at a different application. 
+  In this case, we have a string of test dates from 3 patients. 
+  We want to pull certain test dates out using word()
+  Since our dates are stored using .. as a separator, we must specify this when using word()
+    ** Remember that "." is a regex symbol with its own meaning! To avoid this being interpreted by R, we must escape the characters:
+      A double slash before a symbol will let R know to read it as a normal character. \\ is "escape"
+      Therefore ".." becomes "\\.\\." when we specify the separator
+      
+```{r wordDates}
+# Create our table with a row for each patient
+testDates <- rbind( A = "03/23/2020..04/02/2020..05/14/2020..09/25/2020",
+                    B = "05/04/2020..07/15/2020..08/21/2020",
+                    C = "09/13/2020..09/24/2020..10/01/2020..11/25/2020" )
+
+# Find the first test date for each patient
+for(patient in 1:dim(testDates)[1]){ # for each patient row in range 1 to the number of rows
+  print(word(testDates[patient], start = 1, sep = "\\.\\."))
+}
+
+### For comparison, what happens if you forget to escape the dots?
+word(testDates[1], start = 1, sep = "..")
+
+# Find the most recent test date for all patients
+for(patient in 1:dim(testDates)[1]){ # for each patient row in range 1 to the number of rows
+  print(word(testDates[patient], start = -1, sep = "\\.\\."))
+}
+```
+_____________________________________________________________________________________________________________________
+We can also use str_split() to separate captured ranges of dates, applying the same separator text
+  - This makes them much easier to use for other purposes (graphs, calculations, etc)
+  
+str_split() takes in the string to be split as well as the pattern used to identify splitting locations.  
+
+  For Patient A, we will:
+  1- Find the 1st through 3rd dates
+  2- Print the non-split captured text 
+  3- Split the dates on the same separator used to find them, and print as a list
+```{r wordDatesSplit}
+# Find the 1st through 3rd tests for Patient A
+cat("These are the dates not split, as a string\n")
+dates <- word(testDates[1], start = 1, end = 3, sep = "\\.\\.") # assign to a variable
+dates # view
+
+# Print the split dates 
+cat("\nThese are the split dates as a list")
+print(str_split(dates, pattern = "\\.\\."))
+```
+_____________________________________________________________________________________________________________________
+What if we need to capture only certain dates as a list, if we don't want a range, but need to handpick specific dates?
+  Instead of using word() and str_split() together, we can specify a list of indices to the word function itself!
+  
+  Let's pick out test 1 and 3 for each patient.
+  Using c() to provide a list of positions, we can select certain test dates and return them as a list.
+  
+```{r wordDatesList}
+for(patient in 1:dim(testDates)[1]){
+  print(word(testDates[patient], start = c(1, 3), sep = "\\.\\."))
+}
+```
+
+
+_____________________________________________________________________________________________________________________
+Finally, we will take a look at str_extract(), which prints matched text from a string. 
+
+Let's say we have a list of hospital diagnosis codes, but we only want to pull out certain ones
+The codes we are looking for start with "T" and are followed by the numbers 36-50. (ex: T36)
+
+#We want to create a regex pattern to match against which will:
+- Be one string of text (required for regex)
+- Have each desired code separated by the or symbol "|", so that we pull matches to any of the possible codes in our desired list
+- Not require us to type out every code by hand
+
+```{r makePattern}
+# First, we make our regex pattern text. We know we can use paste to get the list of numbers:
+cat("This is just a character vector of numbers\n")
+paste(36:50)
+
+# But that is not quite what we want. 
+ # Remember, to be a regex pattern, it must be one string of text. 
+ # If we use the collapse option, we can get one string and can specify how the numbers are separated
+    # The "|" is used as "or" in the regex, so each code must be separated by this. 
+    # By adding the letter "T" to our collapse, we add the leading T to each trailing number
+cat("\nThis is a collapsed string of codes with or symbols, but missing leading T\n")
+paste(paste(36:50), collapse ="|T") 
+
+# Almost there! But we are still missing the first "T"
+  # This is an easy fix. We can use paste0 to quickly add the leading T without any separator
+  # The paste0 code will simply surround our previous pattern: paste0("T", previousPattern)
+pat <- paste0("T", paste(paste(36:50), collapse = "|T") ) 
+# View our finished pattern
+cat("\nThis has every code we need to match, separated by the or symbol\n")
+pat
+```
+#Now let's find some matches!
+
+Using the string of codes we are provided as input, the str_extract() function lets us pull out matching text by using the pattern we created in the step above
+```{r matchCodes}
+codes <- "T35..T42..J12..H14..M44..T55..A23..T47..A36..T43..M21..H51" # String of codes to pull matches from
+
+str_extract(codes, pat) # Print the FIRST match
+str_extract_all(codes, pat) # Print ALL matches
+```
+
+
+HAPPY PROGRAMMING! 
+
+

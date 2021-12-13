@@ -1,0 +1,90 @@
+---
+title: "Printing muliple xlsx sheets"
+author: "Samantha L Bell"
+date: "10/29/2020"
+output: html_document
+---
+_____________________________________________________
+This code:
+1- loads the base Iris dataset from R
+2- manipulates the data
+3- prints multiple sheets to a single excel workbook
+
+Load the necessary library packages
+```{r packages}
+library(datasets)
+library(openxlsx)
+library(tidyverse)
+```
+
+Set up the data & empty workbook
+```{r}
+# data from the datasets library
+data(iris)
+
+# an empty workbook object, to be added to and then printed to file
+iris_wb <- createWorkbook() 
+
+# Where the output will be printed 
+outLocation <- "C:/Desktop"
+
+```
+
+Add a summary page to the workbook 
+  * Remember, we are not printing the workbook yet, just adding to the object!
+```{r}
+addWorksheet(iris_wb, "Summary") # Add a blank worksheet and give it a name
+
+sumIris <- summary(iris) # Save a summary table to a variable
+
+writeData(iris_wb, "Summary", sumIris, startRow = 1, startCol = 1) # Write to the worksheet
+```
+
+
+Add a table to the workbook, with some text above it 
+ * Adjusting the startRow or startCol allows for separate writing commands to same sheet
+```{r}
+addWorksheet(iris_wb, "Sepal Length")
+
+sepalTable <- iris %>% group_by(Species) %>% summarise(Ave.Sepal.Length = mean(Sepal.Length)) # Summary of mean sepal length by species
+
+# Write a title to the sheet first, followed by the table
+writeData(iris_wb, "Sepal Length", "Table of average sepal length by species", startCol = 1, startRow = 1)
+writeData(iris_wb, "Sepal Length", sepalTable, startCol = 1, startRow = 3)
+```
+
+
+Add another table to the workbook, but append a graph on the same sheet
+  * Separate commands allow for writing data vs writing plots
+```{r}
+addWorksheet(iris_wb, "Petal Length")
+
+petalTable <- iris %>% group_by(Species) %>% summarise(Ave.Petal.Length = mean(Petal.Length))
+
+# Make a plot
+petalPlot <- plot(y = as.numeric(iris$Petal.Length),               # The petal length on y axis as a continuous variable
+                  x = as.factor(iris$Species),                     # The species on x axis as a factor / discrete variable
+                  col = 3:6 ,                                      # 3 of the base colors available in R
+                  xlab = "", ylab = "Petal Length",                # Labels for x and y axis
+                  cex.axis = 0.6,                                  # Text size
+                  title(main="Length of Petals", col.main="black") # Main title and color
+)
+
+writeData(iris_wb, "Petal Length", petalTable, startRow = 1, startCol = 1) # Write the table
+
+# This command requires that the dersire plot be currently displayed in R in order to print to the sheet
+insertPlot(iris_wb, "Petal Length", fileType = "png",
+           width = 10, height = 6,                    # make the size of the plot
+           startCol = 6)                              # Print to the right of the table by starting at column 6
+```
+
+
+Save the workbook to file!
+```{r}
+saveWorkbook(iris_wb, file = paste0(outLocation, "/", Sys.Date(), " Fun with Iris Data.xlsx"), overwrite = TRUE)
+
+```
+
+
+
+
