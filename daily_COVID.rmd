@@ -1,0 +1,1912 @@
+## Samantha Lynn Bell DHD 01/2022 ##
+____________________________________________________________________________________
+What does this script need?
+____________________________________________________________________________________
+
+This script takes in:
+csv file export of an MDSS disease specific search for confirmed Covid-19 cases in Detroit (Base case investigation)
+- This may consist of multiple files, and there are several options for file loading explained below
+
+____________________________________________________________________________________
+What does this script do?
+____________________________________________________________________________________
+-Determine S or Z drive path availability on the user's system, and create output paths based on this information
+-Determine Box path availability on the user's system, and create output paths
+-Load the MDSS raw data using a selection of user input options
+-Checks that the file(s) loaded correctly, looks for errors and incorrect jurisdictions with the option for removal from analysis
+-Takes in a list of addresses to exclude from patient location mapping
+-Renames columns and creates new variables for downstream use
+-Parses the age variables to create an age in years, and also age groupings
+-Checks for superseded, canceled, or "not a case" cases, with the option for removal from analysis
+-Identify duplicate cases where at least one duplicate is marked as deceased. Flagged using fuzzy match with DOB and patient name
+-Remove duplicate deaths chosen by the user from the fuzzy matched list
+-Prepare test dates for parsing and then create a Combined Disease Date 
+-Flag COVID symptoms and pre-existing conditions
+-Make population count tables for demographics, then use these to create case, age-adjusted, death, and fatality rates
+-Assign a fatality rate to each Combined Disease Date, to allow for plotting of fatality rate over time by sex
+-Make population tables by zip code, to allow for case and death rates to be calculated for each Detroit Zip
+-Create select exports for specific reports and dashboards
+-Save exports to a dated analysis folder
+-Save specific files to other folders where they will be shared or used in downstream reporting on a daily basis
+
+** See the overview document for complete explanation **
+__________________________________________________________________________________
+INSTRUCTIONS
+____________________________________________________________________________________
+Start by being connected to the S drive and Box Sync. 
+Run one block at a time, in order. Follow the prompts and provide information when asked. 
+
+
+Install packages if needed (get current versions)
+** Does not need to be run every time! **
+```{r installPackages}
+install.packages("tidyverse")
+install.packages("summarytools")
+install.packages("janitor")
+install.packages("anytime")
+install.packages("writexl")
+install.packages("svDialogs")
+install.packages("doParallel")
+install.packages("lubridate")
+install.packages("tictoc")
+install.packages("sp")
+install.packages("remotes")
+install.packages("openxlsx")
+install.packages("stringr")
+library(remotes)
+remotes::install_github("bell-samantha/Packages/cleanAddresses")
+
+```
+
+
+Start the clock
+```{r}
+startTime <- Sys.time()
+```
+
+
+Check for installed packages. Please make certain that the following packages are installed and then run the code to load libraries:
+```{r packages}
+# unload any competing packages  (Error if none currently loaded)
+#invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE))
+```
+```{r}
+# Load what we need
+library(tidyverse)
+library(summarytools)
+library(janitor)
+library(anytime)
+library(writexl)
+library(svDialogs)
+library(doParallel)
+library(lubridate)
+library(tictoc)
+library(sp)
+library(cleanAddresses)
+library(openxlsx)
+library(stringr)
+# Detect number of cores and prepare to run parallel loops later
+no_cores <- detectCores() - 1  
+cl <- makeCluster(no_cores)  
+
+reinfection <- 90 # number of days between cases for it to be considered reinfection
+startDate <- anydate("2020-01-01") # date set as the start of the epidemic period we are analyzing
+current_year <- year(Sys.Date()) # Get the current year of the date being analyzed
+```
+
+Check for Z or S drive COVID folder paths - for raw files and save location
+```{r Location Z or S ## Samantha Lynn Bell DHD 2021 ##}
+# initiate the location variables
+internalReportFolder <- "/For internal Tableau reporting/"
+location <- "" #empty for now
+
+# Location set based on what directories exist in the user's space
+if(dir.exists("Z:/Epidemiology")){
+  location <- "Z:/Epidemiology/Data/MDSS/original/COVD-19 Coronavirus/2020_03_Coronavirus"
+}
+if(dir.exists("T:/Epidemiology")){
+  location <- "T:/Epidemiology/Data/MDSS/original/COVD-19 Coronavirus/2020_03_Coronavirus"
+}
+if(dir.exists("S:/Health/Epidemiology")){
+  location <- "S:/Health/Epidemiology/Data/MDSS/original/COVD-19 Coronavirus/2020_03_Coronavirus"
+  }
+
+if(location == ""){stop("Hmmm...Your location seems to be empty. Please verify you are connected to the server and re-run the Location block")}
+
+# output location for dated analysis
+outputLocation <- paste0(location, "/", "Analyzed/", Sys.Date(), "_Analysis")
+dir.create(outputLocation)
+```
+
+Check for Box paths - for saving Investigations, High Risk Location analysis sharing, Data portal, and Mayor Dashboard files
+```{r BoxLocations ## Samantha Lynn Bell DHD 2021 ##}
+mayorDashBox <- ""
+if(dir.exists(paste0("C:/Users/", Sys.info()[['login']], "/Box Sync/Internal COVID Dashboard Files"))){
+  mayorDashBox<-paste0("C:/Users/", Sys.info()[['login']], "/Box Sync/Internal COVID Dashboard Files")}
+if(dir.exists(paste0("C:/Users/", Sys.info()[['login']], "/Box/Internal COVID Dashboard Files"))){
+  mayorDashBox<- paste0("C:/Users/", Sys.info()[['login']], "/Box/Internal COVID Dashboard Files")}
+if(mayorDashBox == ""){stop("Hmmm...Your Box path for the internal dashboard files seems to be empty. Please verify you are connected to Box Sync and have access to the folder. Then re-run the block")}
+
+highriskbox <- ""
+if(dir.exists(paste0("C:/Users/", Sys.info()[['login']], "/Box Sync/COVID-19/COVID-19/Shared output/High Risk Facilities"))){
+  highriskbox<-paste0("C:/Users/", Sys.info()[['login']], "/Box Sync/COVID-19/COVID-19/Shared output/High Risk Facilities")}
+if(dir.exists(paste0("C:/Users/", Sys.info()[['login']], "/Box/COVID-19/COVID-19/Shared output/High Risk Facilities"))){
+  highriskbox<- paste0("C:/Users/", Sys.info()[['login']], "/Box/COVID-19/COVID-19/Shared output/High Risk Facilities")}
+if(highriskbox == ""){stop("Hmmm...Your Box path for the high risk facility files seems to be empty. Please verify you are connected to Box Sync and have access to the folder. Then re-run the block")}
+
+Investigators_Box_location <- ""
+if(dir.exists(paste0("C:/Users/", Sys.info()[['login']], "/Box Sync/COVID-19/COVID-19/Investigations/Case Investigators"))){
+  Investigators_Box_location <- paste0("C:/Users/", Sys.info()[['login']], "/Box Sync/COVID-19/COVID-19/Investigations/Case Investigators")}
+if(dir.exists(paste0("C:/Users/", Sys.info()[['login']], "/Box/COVID-19/COVID-19/Investigations/Case Investigators"))){
+  Investigators_Box_location <- paste0("C:/Users/", Sys.info()[['login']], "/Box/COVID-19/COVID-19/Investigations/Case Investigators")}
+if(Investigators_Box_location == ""){stop("Hmmm...Your Box path for the investigator files seems to be empty. Please verify you are connected to Box Sync and have access to the folder. Then re-run the block")}
+
+dataPortalFilesBox <- ""
+if(dir.exists(paste0("C:/Users/", Sys.info()[['login']], "/Box Sync/Data Portal Files - Public Facing"))){
+  dataPortalFilesBox <- paste0("C:/Users/", Sys.info()[['login']], "/Box Sync/Data Portal Files - Public Facing")}
+if(dir.exists(paste0("C:/Users/", Sys.info()[['login']], "/Box/Data Portal Files - Public Facing"))){
+  dataPortalFilesBox <- paste0("C:/Users/", Sys.info()[['login']], "/Box/Data Portal Files - Public Facing")}
+if(dataPortalFilesBox == ""){stop("Hmmm...Your Box path for the data portal files seems to be empty. Please verify you are connected to Box Sync and have access to the folder. Then re-run the block")}
+
+dlg_message(message = "Please verify that you are connected to Box Sync and that it is active (not paused).", type="ok")
+```
+
+
+Load the MDSS data a variety of ways:
+1 = 2 or more pieces
+2 = 2 old split downloads + a 90 day download
+3 = 1 previous day full download + 14 day download
+4 = 1 complete download
+5 = 1 old complete download, and 2 or more new shorter downloads
+Provide your choice when prompted
+```{r loadData ## Samantha Lynn Bell DHD 2021 ##}
+tic(msg = "Total time to load data:")
+
+
+covidDataDup <- "" # establish the final data variable name that will be used
+
+# Get user input as to the method of loading chosen
+methodLoad <- dlg_list(title = "Select the method of MDSS file loading", choices = c("2 or more new unique downloads", "multiple old unique split downloads + a new shorter download", "1 day-old full download + 1 new 14 day download", "1 complete download", "1 old complete download + 2 or more new shorter downloads"), gui = .GUI)$res
+
+# Load differently depending on the method selected
+if(methodLoad=="2 or more new unique downloads"){ # 2+ unique files
+  # Use the svDialogs package to have a popup ask the user for the file 
+  inputFiles <- dlg_input("How many files do you have to load? (enter a number):")$res
+  inputFilePath <- "" # variable to hold file paths
+  dlg_message("Select each file when prompted", type = "ok")
+  for(i in 1:inputFiles){
+    inputFilePath[i] <- dlg_open(location)$res
+  }
+  filepaths <- str_split(inputFilePath, ",") # Get each separate file path
+  # Load all data from the loaded split files, still separated
+  loaded <-  lapply(filepaths, function(x)read.csv(x, header=TRUE))
+  #Make a blank tibble with the column names 
+  covidDataDup <- as_tibble(rbind(colnames(loaded[[1]]), NA)) %>% row_to_names(row_number =1) %>% mutate(InvestigationID = as.numeric(InvestigationID))
+  for(i in 1:length(filepaths)){ #For each filepath that was loaded
+      #Bind into one dataframe (this can be done because the files should do not have duplicates if split on referral date when downloaded)
+      covidDataDup <-  rbind(covidDataDup, loaded[[i]])
+  }
+}
+if(methodLoad=="multiple old unique split downloads + a new shorter download"){ # 2 old unique downloads & 1 new 90 day download
+  # Use the svDialogs package to have a popup ask the user for the file 
+  inputFiles <- dlg_input("How many old split download files do you have to load? (enter a number):")$res
+  inputFilePath <- "" # variable to hold file paths
+  dlg_message("Select and open each file when prompted", type = "ok")
+  for(i in 1:inputFiles){
+    inputFilePath[i] <- dlg_open(location)$res
+  }
+  filepaths <- str_split(inputFilePath, ",") # Get each separate file path
+  # Load all data from the loaded split files, still separated
+  loaded <-  lapply(filepaths, function(x)read.csv(x, header=TRUE))
+  #Make a blank tibble with the column names 
+  dlg_message("Select the 1 new shorter file when prompted", type = "ok")
+  nam2_90 <- dlg_open(location)$res
+  #90 Day data loaded
+  day_90 <-  read.csv(nam2_90, header=TRUE)
+  #Join the new files, then join with the 90 day file - keeping newest version of records that appear in both datasets
+  first_join <- rbind(loaded[[1]], loaded[[2]])
+  diff <- anti_join(first_join, day_90, by="InvestigationID")
+  covidDataDup <-  rbind(diff, day_90)
+}
+if(methodLoad=="1 day-old full download + 1 new 14 day download"){ # 1 day-old full download & 1 new 14day download
+  dlg_message("Select the 1 new 14 day download when prompted", type = "ok")
+  nam3_14 <- dlg_open(location)$res
+  dlg_message("Select the 1 day-old full download when prompted", type = "ok")
+  nam3_old <- dlg_open(location)$res
+  #Load both files
+  covidDataFull <- read.csv(nam3_old, header=TRUE)
+  covidData14 <- read.csv(nam3_14, header=TRUE)
+  #Join the 2 files - keeping newest version of records that appear in both datasets
+  diff <- anti_join(covidDataFull, covidData14, by="InvestigationID")
+  covidDataDup <-  rbind(covidData14, diff)
+}
+if(methodLoad=="1 complete download"){
+  dlg_message("Select the full download when prompted", type = "ok")
+  nam4 <- dlg_open(location)$res
+  covidDataDup <-  read.csv(nam4, header=TRUE)
+}
+if(methodLoad=="1 old complete download + 2 or more new shorter downloads"){ # 2 or more new unique files plus one old full download
+  # Load the old full dataset
+  dlg_message("Select the old full download when prompted", type = "ok")
+  nam5_old <- dlg_open(location)$res
+  covidDataFull <- read.csv(nam5_old, header=TRUE)
+  
+  # Load the new shorter downloads
+    # Use the svDialogs package to have a popup ask the user for the file 
+  inputFiles <- dlg_input("How many split download files do you have to load? (enter a number):")$res
+  dlg_message("Select each file when prompted", type = "ok")
+  for(i in 1:inputFiles){
+    inputFilePath[i] <- dlg_open(location)$res
+  }
+  filepaths5 <- str_split(inputFilePath, ",") # Get each separate file path
+  #All data from new short loaded files, still separated
+  loaded5 <- lapply(filepaths, function(x)read.csv(x, header=TRUE))
+  #Make a blank tibble with the column names 
+  newFiles <- as_tibble(rbind(colnames(loaded5[[1]]), NA)) %>% row_to_names(row_number =1) %>% mutate(InvestigationID = as.numeric(InvestigationID))
+  for(i in 1:length(filepaths5)){ #For each filepath that was loaded
+      #Bind into one dataframe (this can be done because the files should do not have duplicates if split on referral date when downloaded)
+      newFiles <-  rbind(newFiles, loaded5[[i]])
+  }
+  
+  #Join the old and new files - keeping newest version of records that appear in both datasets
+  diff <- anti_join(covidDataFull, newFiles, by="InvestigationID")
+  covidDataDup <-  rbind(newFiles, diff)
+}
+
+toc(func.toc = toc.outmsg)
+```
+
+Check for any raw data errors or concerns
+Mutate column format
+```{r CheckLoad ## Samantha Lynn Bell DHD 2021 ##}
+# Make a backup of the raw load
+backup <- covidDataDup
+dlg_message("A backup of CovidDataDup has been made - you can revert to this backup by running covidDataDup <- backup at any time.", type = "ok")
+
+# First, make columns characters so format is consistent
+covidDataDup <- covidDataDup %>% mutate_all(as.character)
+
+# Check for records with incorrect jurisdiction
+Flagged_cases <- covidDataDup %>% filter(JURISDICTION != "Detroit City")
+
+if(length(Flagged_cases$InvestigationID)>0){
+  removeJurisdiction <- dlg_message("WARNING! There are cases from other juristictions in the dataset.\nPlease check Flagged_cases dataframe and remove any desired Ids from the complete dataset.\n\nWould you like to remove ALL cases from other jurisdictions? (If no, you can manually enter and remove selected ids)", type = "yesno")$res
+  if(removeJurisdiction == "yes"){
+    Ids <- Flagged_cases$InvestigationID
+    covidDataDup <- covidDataDup %>% filter(!(InvestigationID %in% Ids))
+  }
+}
+# If you need to remove only some individual Ids, please use this code
+## Ids <- c("123", "456", "789") # Type in your ids 
+
+# Identify any download errors
+if(isTRUE(any(covidDataDup == "An error occurred while exporting this case."))){stop("WARNING! There are error rows in one of your files.")}
+
+# Give a warning if your merged file resulted in duplicate rows
+if( dim(covidDataDup)[1] != length(unique(covidDataDup$InvestigationID))){stop("WARNING! The merged data.frame contains duplicate Investigation Ids.")}
+
+# Reformat all date columns except those with square bracket lists
+dateCols <- colnames(covidDataDup[grepl("date", colnames(covidDataDup), ignore.case = TRUE)&!grepl("collection|report", colnames(covidDataDup), ignore.case = TRUE)])
+covidDataDup <- suppressWarnings(covidDataDup %>% mutate_at(all_of(dateCols), funs(anydate(.)))) # origin adjusted due to weird loading
+```
+
+
+Exclude any non-patient addresses from downstream mapping
+  These are removed due to not being the true address of the patient, and in many cases are test sites/hospitals
+  A default list is provided, adjust this regex as suits your needs
+```{r excludeAddresses ## Samantha Lynn Bell DHD 2021 ##}
+exclusion_Addresses <- "(^100 MACK|^400 MACK|PO Box|P O BOX|P.O. BOX|Unknown|homeless|^2799 (W|WEST)*.*GRAND B|^22101 MOROSS R|^4646 JOHN R R|1 ford pl|one energy pl|1 energy pl|^5635 (W|WEST)*.*FORT S|^2 WOODWARD|^500 GRISWOLD S|^4201 (ST|SAINT) ANTOINE S|^4646 JOHN R S|^570 CLINTON S|^3456 (W|WEST)*.*VERNOR H|^6071 (W|WEST)*.*OUTER DR|^16238 (W|WEST)*.*WARREN A|^600 (E|EAST)*.*LAFAYETTE B|^23 (E|EAST)*.* ADAMS AVE|^4880 LAWNDALE S|^17600 RYAN R)"
+
+needEdit <- dlg_message(message = paste("Do you have any new addresses to add to the exclusion list? \n\n", exclusion_Addresses), type = "yesno")$res
+
+if(needEdit == "yes"){
+  exclusion_Addresses <- dlgInput("Please enter the regex expression you wish to use to find non-patient addresses (Include ALL addresses. Do not use quotes):")
+}
+
+# Make a variable to use for mapping, that will include only true patient addresses
+  # Not an exclusion address
+  # Not missing street number
+  # Not MDSS filled city or ZIP for geocoding
+covidDataDup <- covidDataDup %>% mutate(
+  Patient_Address_Only = case_when(
+    !grepl(exclusion_Addresses, Street_Address, ignore.case = TRUE) & grepl("\\d", Street_Address)&
+      !is.na(City)&!grepl("MDSS Zip Code *|MDSS City *|MDSS Zip Code", Investigation_Addr_Geo_Source, ignore.case = TRUE) ~ cleanAddresses::simplify_street(street=Street_Address, numWord=3), 
+    TRUE ~ NA_character_
+  )
+)
+```
+
+* Remove cases that do not have confirmed status, then add some variables:
+- Rename some of the columns so that we know what they contain (Variable names can change, depending on what names MDSS gives you)
+- Make the patient age numeric, and use this number along with the age units to create a new column containing the age in years
+- Make a new column which checks patient status and case disposition to see if the patient is deceased
+- Make a column with simple 5 digit investigation zip code, excluding test sites and faulty addresses and imputed zips from MDSS
+- Make a simplified race factor column, using the primary race. Options are Black, White, Other
+- Label potential students in a column named Occupation2, flag based on age and missing school/occupation information
+- Make date columns for display on dashboards - include long day format, MDY format, a 14 day MDY, a 30 day MDY, and a 90 day MDY
+- Use a combination of Date of Death(1st choice) and Patient Status Date to make Death Date for some plotting later (not curves)
+- Add a count of how many times each patient ID occurs (may have more than one investigation per patient)
+- Flag the first record for each patient ID
+
+** Some names are used simply to maintain name consistency in downstream analysis, as MDSS variable names frequently change. 
+```{r rename, newCols ## Samantha Lynn Bell DHD 2020 ## Katerina Stylianou 12/2020}
+covidDataDup <- covidDataDup %>% filter(Case_Status=="Confirmed") #restrict dataset to confirmed cases only
+
+covidDataDup <- covidDataDup %>% dplyr::rename(
+	Attended_a_community_event_or = Community_event_mass_gatherin,
+	Community_event_or_mass_gathe = Name009,
+  County_Health_Dept_of_contact = County_Health_Dept,
+  Patient_Age = Age,
+  Patient_Sex = Sex_at_Birth,
+	Had_Contact_With_Positive_Animal = Exposure_to_animal_with_confi,
+	Has_the_patient_been_to_a_daycare = Childcare_Youth_programs_e_g_,
+  High_risk_facility_Patient = If_yes__is_patient,
+  High_risk_live_or_work_facility = Type_of_facility,
+	High_risk_work_or_living = Does_the_patient_live_or_work,
+  If_yes__location = Location, #added on 2/1/2021, new MDSS named Location
+	if_yes__specify = Name014,
+  if_yes__specify000 = Name,
+  if_yes__specify001 = Name003,
+  if_yes__specify002 = Name000,  
+	if_yes__specify003 = Name015, 
+  if_yes__specify004 = Name004,
+	Location = Location__address_or_best_des009, #previous field that used to be named Location when downstream analysis was set up
+  Patient_Died = INV171,  #updated for  MDSS6.4.1
+  Patient_Race = Race,
+  Spent_time_at_adult_congregat = LTC_SNF_assisted_living_adult,
+	Spent_time_at_a_correctional_ = Jail_prison_detention_center,
+	Spent_time_at_a_school__unive = Primary_or_secondary_school_C,
+	Spent_time_at_worksite = Workplace_outside_of_home_oth,
+  Was_quarantined_at_onset = At_time_of_symptom_onset__or_) %>% mutate( 
+    
+    # Send the above newly named variables on to make other variables here
+	  Patient_Age = as.numeric(Patient_Age),
+    Age_In_Years = case_when( # if age is in months, convert to years in new column
+    Age_Units == "Months" | Age_Units == "months" ~ round(Patient_Age/12, digits = 2),
+    Age_Units == "Days" | Age_Units == "days" ~ round(Patient_Age/365, digits = 2),
+    Age_Units == "Years" | Age_Units == "years" ~ Patient_Age),# Otherwise keep the age (in years already)
+	  Deceased = case_when(
+      Patient_Status == "D" | Case_Disposition == "D" ~ "Deceased",
+      TRUE ~ "Alive"),
+    Simple_Investigation_Zip = case_when( #Used to get consistent 5 digit zip code for all cases. Not in exclusion addresses, and not imputed by MDSS
+      !grepl(exclusion_Addresses, Street_Address, ignore.case = TRUE)&!is.na(Patient_Address_Only) ~ substr(covidDataDup$Zip, 1, 5),
+      grepl(exclusion_Addresses, Street_Address, ignore.case = TRUE)|is.na(Patient_Address_Only) ~ "NONE"),
+    Simple_Race = case_when(# Make a simple race field
+      substr(Patient_Race, 1, 5)=="Cauca" ~ "White", 
+      substr(Patient_Race, 1, 5)=="Black" ~ "Black",
+      substr(Patient_Race, 1, 5)=="Ameri" | substr(Patient_Race, 1, 5)=="Asian" | substr(Patient_Race, 1, 5)=="Nativ" | substr(Patient_Race, 1, 5)=="Other" ~ "Other",
+      TRUE ~ Patient_Race)
+      )%>% mutate(
+        Occupation2 = case_when( # Identify students using more criteria
+          !is.na(Spent_time_at_a_school__unive) & is.na(Occupations_Grade) & Age_In_Years >5 & Age_In_Years <=23 ~ "Student",
+          TRUE ~ Occupations_Grade))
+
+
+# Make a column with data update date to use as stamp on dashboard
+covidDataDup$Today <- format(Sys.Date(), "%A, %b %d")
+covidDataDup$AnalysisDate <- format(Sys.Date(), "%b %d, %Y")
+covidDataDup$NinetyDate <- format(Sys.Date()-90, "%b %d, %Y")
+covidDataDup$ThirtyDate <- format(Sys.Date()-30, "%b %d, %Y")
+covidDataDup$FourteenDate <- format(Sys.Date()-14, "%b %d, %Y")
+
+
+covidDataDup <- covidDataDup %>% mutate( # If Date_of_Death is NA, use Patient_Status_Date if that patient is confirmed deceased
+  Combined_Death_Date = case_when(is.na(Date_of_Death)&Deceased=="Deceased" ~ Patient_Status_Date,
+  TRUE ~ Date_of_Death) # Set death date as Date_of_Death, if available
+)
+
+# Make a column with tally of the # of occurences of each patient ID (How many investigations per patient)
+covidDataDup <- covidDataDup %>% add_count(Patient_ID) %>% mutate(Patient_ID_Count = n)
+# Flag the 1st record for this patient
+x <- covidDataDup %>% filter(Patient_ID_Count>1) %>% group_by(Patient_ID) %>% summarise(Referral_Date = min(Referral_Date), First_Record_This_Patient = "Y")
+covidDataDup <- left_join(covidDataDup, x, by=c("Patient_ID", "Referral_Date"))
+```
+
+
+Define all ages in years and set the age groups to allow for plotting by age group later on
+Age_Range2 modifies Age_Range by adding 10-14 and 15-19 categories (split 10-20)
+```{r parseAge ## Samantha Lynn Bell DHD 2020 ##}
+
+covidDataDup$Patient_Age <- as.numeric(covidDataDup$Patient_Age)
+
+covidDataDup <- covidDataDup %>%
+  mutate(
+    Age_In_Years = case_when( # if age is in months, convert to years in new column
+      Age_Units == "Months" | Age_Units == "months" ~ round(Patient_Age/12, digits = 2),
+      Age_Units == "Days" | Age_Units == "days" ~ round(Patient_Age/365, digits = 2),
+      Age_Units == "Years" | Age_Units == "years" ~ Patient_Age # Otherwise keep the age (in years already)
+    ),
+    Age_Range = factor(case_when( # Make age range categories
+      Age_In_Years < 1                      ~ 1,
+      Age_In_Years >=1 & Age_In_Years<10    ~ 2,  # cannot use range 1:9 due to decimals
+      Age_In_Years >=10 & Age_In_Years<20   ~ 3,
+      Age_In_Years >=20 & Age_In_Years<30   ~ 4,
+      Age_In_Years >=30 & Age_In_Years<40   ~ 5,
+      Age_In_Years >=40 & Age_In_Years<50   ~ 6,
+      Age_In_Years >=50 & Age_In_Years<60   ~ 7,
+      Age_In_Years >=60 & Age_In_Years<70   ~ 8,
+      Age_In_Years >=70 & Age_In_Years<80   ~ 9,
+      Age_In_Years >= 80                            ~ 10), 
+      levels = c(1,2,3,4,5,6,7,8,9,10), 
+      labels = c("Less_than_1", "1_9", "10_19", "20_29", "30_39", "40_49", "50_59", "60_69", "70_79", "80_plus")
+      ))%>% mutate(
+  Age_Range2 = case_when(
+      Age_In_Years >=10 & Age_In_Years<15   ~ "10_14",
+      Age_In_Years >=15 & Age_In_Years<20   ~ "15_19",
+      TRUE ~ paste(Age_Range))
+      )
+```
+
+Summarize the superseded cases, and find which ones do no have a duplicate Patient ID (do not have a non-superseded version)
+```{r superseded ## Samantha Lynn Bell DHD 2021 ##}
+superseded <- covidDataDup %>% group_by(Patient_ID, Case_Status, Investigation_Status, Deceased) %>% summarise() # Summarize the relevant info
+superseded_indices <- which(superseded$Investigation_Status=="Superceded") # what rows have superseded cases?
+superseded_patientIds <- superseded$Patient_ID[superseded_indices] # what Patient ids are the superseded cases?
+superseded2 <- superseded %>% filter(Patient_ID %in% superseded_patientIds) # subset for only patient ids that have a superseded case (include their non-superseded version)
+
+# count the number of occurrences for each patient id (to see ones that have no duplicate but are superseded)
+Num_patients <- table(superseded2$Patient_ID) 
+superseded2 <- superseded2 %>% mutate(Num_Occur =  Num_patients[as.character(Patient_ID)]) # assign the counts to the data
+
+# remove superseded cases, canceled cases, and non-cases
+covidDataDup <- covidDataDup[covidDataDup$Investigation_Status != "Superceded" & covidDataDup$Case_Status != "Not a Case" & covidDataDup$Investigation_Status != "Canceled",]
+```
+
+
+Check and remove duplicate death cases (deceased patient has more than one record)
+1- Make a combo id for each record out of name and DOB
+2- Subset for deaths only
+3- For the deceased cases, look for its combo id in the full dataset and give all matches the same new duplicate ID
+
+```{r findDuplicates ## Samantha Lynn Bell DHD 2021 ##}
+# Run parallel
+registerDoParallel(cl) 
+
+tic(msg = "Total time to check for duplicate deaths:")
+if(length(covidDataDup$Deceased["Deceased"%in%covidDataDup$Deceased])<1){
+  dlg_message("Hmm...it appears you have no death records. No fuzzy matching will occur. Proceeding to next step", type = "ok")
+  covidData <- covidDataDup
+}else{
+  # make a combination id for use with fuzzy matching
+  covidDataDup <- covidDataDup %>% mutate( 
+      comboID = paste0(First, Last, Date_of_Birth),
+  )
+  # Subset for deceased records
+  deaths <- covidDataDup[covidDataDup$Deceased=="Deceased",]
+  # Initiate empty variables
+  newID <-  rep(0, dim(covidDataDup)[1])
+  rows <- c(1:dim(deaths)[1])
+  
+  # Find the fuzzy-matched combination ids for each comboID in the death subset (this is run in parallel)
+  # combo ids from the death subset are checked against the full dataset to find any duplicates with alive status (one dead, one alive)
+  matched <- foreach(x = rows) %dopar% { 
+    agrep(deaths$comboID[x], covidDataDup$comboID, ignore.case = TRUE, value = FALSE, max.distance = 0.025)
+  }
+  for(x in rows) {
+    match <- matched[[x]]
+    newID[match] <- paste0(x, "_dup") # apply new id to each matched row
+  }
+  covidDataDup <- cbind(covidDataDup, newID)
+  Num_combos <- table(covidDataDup$newID) # count the number of occurrences for each comboID
+  covidDataDup$Num_Occur <- Num_combos[as.character(covidDataDup$newID)] #add the count of each duplicate new id as a column
+  covidDataDup$Num_Occur[covidDataDup$newID==0] <- NA #if the duplicate id was "0" (not given an ID), make the count NA
+  
+  # Find Patient Ids that occur more than once, and see if they are repeats or different testing dates
+  t <- table(covidDataDup$Patient_ID)>1
+  w <- which(t)
+  # Print the records with a comboID match (potential duplicates) or patientID match (true match)
+  dups <- covidDataDup %>% filter( (Num_Occur >1|covidDataDup$Patient_ID%in%names(w)) & newID!=0 ) %>% group_by(comboID, newID, Referral_Date, Num_Occur, InvestigationID, Patient_ID, Case_Status, Investigation_Status, Deceased) %>% summarise()
+  
+  # get ready to remove duplicates
+  covidData <- covidDataDup
+  
+  toc()
+  
+  # Show the duplicate death cases
+  dups
+}
+```
+
+
+Review the duplicates printed above, and remove the appropriate records
+* If the cases have referral dates 90+ days apart, they may be reinfection cases and should be reviewed before deduplicating. Each death should be only counted one time, however. 
+* If a case has a dead record and alive record, confirm death and keep the dead record once confirmed. If found not to actually be a death, keep the alive record
+* If a case has 2 dead records, keep the older one (will have more interview info and notes for analysis)
+```{r removeDuplicateDeaths ## Samantha Lynn Bell DHD 2020 ##}
+deathDups <- dlg_message("Do you have duplicate records to remove?", type = "yesno")$res
+if(deathDups=="yes"){
+  badId <- dlgInput("Please provde the investigation ids you would like to remove. Use the following format:\n1234|0987|5555")$res
+  badRow <- grep(badId, covidDataDup$InvestigationID)
+  covidData <- covidDataDup[-badRow,]
+  badIDRow <- paste(paste(Sys.Date()), ",", badId, ",", paste(Sys.info()[['login']]))
+  write(badIDRow, paste0(location, "/", "Duplicate_Ids_Removed_in_Analysis.csv"), append = TRUE)
+}
+
+# Find Patient Ids that occur more than once, and see if they are repeats or different testing dates
+t2 <- table(covidData$Patient_ID)>1
+w2 <- which(t2)
+# Print the records with a comboID match (potential duplicates) or patientID match (true match)
+dups2 <- covidData %>% filter( covidData$Patient_ID%in%names(w2) & newID!=0) %>% 
+  group_by(comboID, newID, Referral_Date, Num_Occur, InvestigationID, Patient_ID, Case_Status, Investigation_Status, Deceased) %>% summarise()
+
+test <- table((dups2%>%filter(Deceased=="Deceased"))$newID)
+anyMissed <- which(test>1)
+cat("If you missed any duplicates, their 'newID' will be listed here:  ")
+(names(anyMissed))
+  
+```
+
+
+** PREPARE THE TEST DATES FOR MAKING COMBINED DISEASE DATE **
+- Make a date field which takes the OLDEST out of Referral and Onset dates. This will be used to identify the oldest records when patients have repeat infections
+- Get lists of test names, dates, and results
+- Identify which tests in the list are for positive, covid tests. Save these positive test indices and dates
+  # First split item will be "" due to splitting on digits. 
+  This is accounted for by subtracting 1 to get true positive test number(# out of all patient tests), and then adding 1 to the index when grabbing dates.
+  (i.e. patient's "third" test will be in position 4)
+- Save the covid test dates as a field in the dataframe
+
+```{r prepareTestDates ## Samantha Lynn Bell DHD 2021 ##}
+tic(msg = "Total time to prepare test dates:")
+
+# Make date field using min of Referral and Onset for all records
+covidData <- covidData %>% mutate(FirstDate = pmin(Referral_Date, Onset_Date, na.rm = TRUE ))
+
+# Split the names and dates into lists that we can pull individuals from
+covidData$TestNames <- as.list(str_split(covidData$Test_Name,  "\\[\\d+\\]"))# split using the square brackets and numbers
+covidData$ReportedTestNames <- as.list(str_split(covidData$Reported_Test_Name,  "\\[\\d+\\]"))
+covidData$TestDates <- as.list(str_split(covidData$Collection_Date,  "\\[\\d+\\]"))
+covidData$Test_Results <- as.list(str_split(covidData$Test_Result, "\\[\\d+\\]"))
+covidData$ReportDates <- as.list(str_split(covidData$Report_Date,  "\\[\\d+\\]" ))
+
+# Check which tests for each patient have a coronavirus-related name and a positive result
+covidData$PositiveTestCheck <- foreach(i = 1:dim(covidData)[1]) %dopar%{
+    (grepl("cov|corona", covidData$TestNames[[i]], ignore.case = TRUE)|grepl("cov|corona", covidData$ReportedTestNames[[i]], ignore.case = TRUE)) &
+        (grepl("pos|true|detected|reactive|yes", covidData$Test_Results[[i]], ignore.case = TRUE) & !grepl("not|non|negative|MRN",covidData$Test_Results[[i]], ignore.case = TRUE)) 
+}
+
+# Get the indices of positive covid tests for each patient
+covidData$PositiveCovidTests <- foreach(i = 1:dim(covidData)[1]) %dopar%{ 
+  which(covidData$PositiveTestCheck[[i]])-1 # "which" will tell us the indices for TRUE values in PositiveTestCheck, meaning ones that passed the test and are positive tests
+}
+# Get the dates associated with the positive tests for each patient
+PositiveCovidTestDates <- foreach(i = 1:dim(covidData)[1]) %dopar%{ # for 1 to the # of patient rows
+  # wrap in anydate() to convert to date type
+  # take list of test dates, and subset using the indices of only positive tests (get a shorter list of test dates)
+  # each index gets +1 to account for "" at beginning of split date list (1 was subtracted to get the true test number previously - i.e. patient's "third" test will be in position 4)
+ anytime::anydate(covidData$TestDates[i][[1]][covidData$PositiveCovidTests[i][[1]]+1])
+}
+# Similarly, capture the report dates for each positive test
+PositiveCovidTestReportDates <- foreach(i = 1:dim(covidData)[1]) %dopar%{
+  anytime::anydate(covidData$ReportDates[i][[1]][covidData$PositiveCovidTests[i][[1]]+1])
+}
+covidData$PositiveCovidTestDates <- PositiveCovidTestDates #assign to the dataframe as well
+covidData$PositiveCovidTestReportDates <- PositiveCovidTestReportDates
+
+toc()
+```
+
+
+** MAKE COMBINED DISEASE DATE **
+LOGIC:
+
+Prior to making the combined date, invalid Onset or Referral dates are made NA:
+	Any dates before the start date set by the user 
+	Any dates after the current calendar year (user supplied)
+	Any Onset date after its Referral date
+	Any Onset date 30+ days apart from its Referral date
+
+Onset date is first choice
+Oldest positive test date for this investigation is second choice
+Referral date is third choice
+
+Valid test dates must:
+  Be at least the reinfection time period away from any previous record onset/referral for this same Patient ID
+  Be within 30 days of the referral date for this investigation
+  Have a year less than or equal to the current year set by the user
+  Come on or after the start date set by the user
+  Not be NA
+  
+1) 
+IF PatientID count = 1 |OR| there is a no prior record for this same patient ID (it is the first one chronologically)
+    CAPTURE oldest positive covid test date 
+
+    IF (no valid onset date)
+    AND (oldest positive covid test date is valid)
+      THEN (take oldest positive covid test date) 
+
+    IF (no onset date)
+    AND (no oldest positive covid test date or test date before start date or a test date year greater than the greatest year in the dataset)
+      THEN (take referral date)
+
+    Otherwise, use onset date
+
+2)
+IF PatientID count >1
+  CAPTURE all cases with same PatientID, order them by the new combo date created above
+    FOR this record and the previously dated record:
+
+			IF there is a prior record for this same patient ID (before this one chronologically)
+			  IF this date â previous date <=90
+				  FLAG for deduplication
+				  CDD = NA
+
+   	    IF this date â previous date >90
+		      CAPTURE the oldest test date that is > 90 days after the previous recordâs referral/onset date
+			  	  (Donât want to pull test dates from previous cases this patient has)
+		    
+      	    IF (no valid onset date)
+        		  AND (oldest positive covid test date is valid)
+      	      THEN (take oldest positive covid test date) 
+  
+        		IF (no onset date)
+          		AND (no oldest positive covid test date or test date before start date or test date year greater than the current year)
+          		THEN (take referral date)
+    
+        		Otherwise, use onset date
+        		
+Clean up the date fields before making combined disease date
+```{r cleanDates}
+# Dates made into NA if prior to the provided start date or after current year of the dataset
+# Additionally Onset dates made NA if Onset < Referral, or 30+ days between Onset and Referral (absolute value of time difference)
+covidData$Onset_Date[(year(covidData$Onset_Date))>current_year|(covidData$Onset_Date<startDate)|
+                       (covidData$Onset_Date>covidData$Referral_Date)|abs((difftime(covidData$Referral_Date,covidData$Onset_Date, units="days")>=30))] <- NA
+covidData$Referral_Date[(year(covidData$Referral_Date)>current_year)|(covidData$Referral_Date<startDate)] <- NA
+```
+
+Make the combined disease dates
+```{r combinedDiseaseDate ## Samantha Lynn Bell DHD 2021 ##}
+tic(msg = "Time it took to make combined disease dates:")
+# Make a function which will provide the oldest, relevant date out of the supplied dates
+parse_Date <- function(Onset, Referral, Tests, Prev_Record_Date, Dim){
+  # Find the oldest test for this investigation - the oldest test that comes at least 90 days after the referral/onset of the previous record for this patient
+    # Set the chosen test date to zero unless there is a test date more than 90 days after the previous record's test date (if zero, will not be used as CDD)
+  oldest_test_this_investigation <- 0
+  ### If there is a previous record
+  if(!is.na(Prev_Record_Date)){  
+    # Keep only valid tests that are 90 days after the previous record's CDD AND within 30 days of this investigation's referral date
+    clean_Tests <- Tests[(!is.na(Tests)) & (year(Tests)<=current_year) & (Tests>=startDate) & ((Tests-Prev_Record_Date)>reinfection) &
+                            (abs(difftime(Tests, Referral, units="days"))<=30)] 
+    oldest_test_this_investigation <- min(clean_Tests) # take min of the selected test dates
+  }
+  ### If only one case for this patient (dimensions of Pat_Tib are 1) and there is a test date listed
+  # OR
+  ### If there is not a previous record, but this is not the only record for this patient (is the oldest record for this patient) 
+  if(TRUE %in% (Dim<2 & !is.na(Tests)) | (Dim>1 & is.na(Prev_Record_Date)) ){ 
+    # Keep only valid test dates (same as above but without previous record date check)
+    clean_Tests <- Tests[which(!is.na(Tests)&(as.numeric(year(anydate(Tests))<=current_year))&(Tests>=startDate))] 
+    # if some tests pass the check, take min test date
+    oldest_test_this_investigation <- as_date(if_else(
+      length(clean_Tests)>=1, # If at least one test passed the check , take the min
+      min(Tests[!is.na(Tests)]), #take min of these test dates only (filter for valid dates)
+      ymd(NA)), origin = "1970-01-01") # if no tests pass the check, set as NA with date format
+  } 
+  
+  if(is.na(oldest_test_this_investigation)){ oldest_test_this_investigation <- 0 } # any NA oldest test dates are set to 0
+  
+  # Use the oldest test date and Onset and Referral dates to determine the best date for combined date
+  if( (is.na(Onset)|is.null(Onset)) & 
+      (oldest_test_this_investigation > 0) ){ # if the onset date is NA and test date is valid
+      return(oldest_test_this_investigation) # Test date is first choice before Referral date, as long as it is valid
+  }
+  if( (is.na(Onset)|is.null(Onset)) &
+      (oldest_test_this_investigation==0|oldest_test_this_investigation<=startDate|as.numeric(year(anydate(oldest_test_this_investigation)))>current_year) ){
+        return(Referral)
+  }
+}
+
+
+
+# Make a function to assess the number of unique cases (not duplicates, but reinfections) per patient, and call on date function with appropriate fields
+parse_Records <- function(Pat_Tib, ID_count, Inv_ID, i){
+  # Find the row of the subset that contains the current record
+  rowNum <- which(Pat_Tib$InvestigationID==Inv_ID) 
+  
+  # Treat patient IDs that occur only once, and records that are the first investigation chronologically(none above it in subset) for a given patient ID the same way
+  if( (ID_count==1) | (is_empty(Pat_Tib$InvestigationID[rowNum-1])) ){
+    # Make the combined date
+    parse_Date(Pat_Tib$Onset_Date[rowNum], Pat_Tib$Referral_Date[rowNum], Pat_Tib$PositiveCovidTestDates[[rowNum]], NA, dim(Pat_Tib)[1])
+  }else{
+    # Check if the current record's first date is more than reinfection days after any previous record the patient has (and therefore reinfection)
+    if(difftime(Pat_Tib$FirstDate[rowNum] , Pat_Tib$FirstDate[rowNum-1]  , units = c("days"))<=reinfection){ #if not more than reinfection days apart
+      return(NA) #set Combined Disease Date to NA (since it occurred within the 90days after another infection)
+    }
+    if(difftime(Pat_Tib$FirstDate[rowNum] , Pat_Tib$FirstDate[rowNum-1]  , units = c("days"))>reinfection){ #if more than reinfection days apart (new infection for this patient)
+      # Make the combined date
+      parse_Date(Pat_Tib$Onset_Date[rowNum], Pat_Tib$Referral_Date[rowNum], Pat_Tib$PositiveCovidTestDates[[rowNum]], Pat_Tib$FirstDate[rowNum-1], dim(Pat_Tib)[1])
+    }
+  }
+}
+
+# Make the dates for all the records
+covidData$Combined_Disease_Date <- covidData$Onset_Date # Default start with Onset Date
+covidData$flag_for_deduplication <- rep(NA, dim(covidData)[1])
+print("Making Combined Disease Date, please be patient :-) ")
+pb <- txtProgressBar(min = 0, max = dim(covidData)[1], style = 3) # set up progess bar
+suppressWarnings(for(i in 1:dim(covidData)[1]){
+  setTxtProgressBar(pb, i)
+  # Capture info on the records matching this same patient ID
+  # Sort by FirstDate field (oldest to newest)
+  Patient_Tibble <- as_tibble(covidData[(covidData$Patient_ID == covidData$Patient_ID[i]),] %>% 
+                                select(PositiveCovidTestDates, Patient_ID, Patient_ID_Count, InvestigationID, Referral_Date, Onset_Date, FirstDate)) %>% arrange(., FirstDate) 
+  # Call on the functions - send the tibble through and get back combined disease date
+  covidData$Combined_Disease_Date[i] <- anydate(paste(suppressWarnings(parse_Records(Patient_Tibble, covidData$Patient_ID_Count[i], covidData$InvestigationID[i], i))))
+})
+
+# set the CDD as a factor
+covidData <- covidData %>% mutate(Combined_Disease_Date = as.factor(Combined_Disease_Date))
+
+# Print a subset of those flagged for deduplication
+dups_tib <- covidData %>% filter(Patient_ID_Count>1) %>% select(Patient_ID, Patient_ID_Count, InvestigationID, FirstDate)
+flag_for_deduplication <- ""
+for(i in unique(dups_tib$Patient_ID)){
+  recs <- dups_tib %>% filter(Patient_ID == i)
+  for(j in 1:dim(recs)[1]){
+    if(is_empty(recs$InvestigationID[j-1])){flag_for_deduplication[i]<-"NA"}else{
+      if(difftime(dups_tib$FirstDate[j] , dups_tib$FirstDate[j-1]   , units = c("days"))<=reinfection){flag_for_deduplication[i]<-"Y"}}
+  }
+}
+needDedup <- covidData[covidData$InvestigationID %in% dups_tib$InvestigationID[flag_for_deduplication=="Y"],] %>% select(Patient_ID, Patient_ID_Count, InvestigationID, FirstDate, PositiveCovidTestDates)
+if(dim(needDedup)[1]>1){write.xlsx(needDedup, paste0(outputLocation, "/", "Cases that need deduplication-overlap reinfection time period.xlsx"), row.names = FALSE)}
+
+# Collect unique patient IDs that have reinfections
+Reinfections <- unique(covidData$Patient_ID[!is.na(covidData$Combined_Disease_Date) & covidData$Patient_ID_Count>1 & is.na(covidData$First_Record_This_Patient)])
+# Flag reinfections in the dataset
+covidData <- covidData %>% mutate(
+  Reinfection = case_when( 
+      !is.na(Combined_Disease_Date) &
+      Patient_ID_Count>1 &
+      is.na(First_Record_This_Patient) ~ "Y", 
+                          TRUE ~ "N")
+)
+
+# Clean up the test date field for reporting
+covidData <- covidData %>% mutate(
+  PositiveCovidTestReportDates = gsub("\\)|c\\(", "", PositiveCovidTestReportDates ), 
+  PositiveCovidTestDates = gsub("\\)|c\\(", "", PositiveCovidTestDates )
+) 
+
+covidData$oldestPositiveCovidTestDate <- suppressWarnings(anydate(sapply(covidData$PositiveCovidTestDates, 
+                                                        function(x)(min(days(str_split(x, ",", simplify = TRUE))+anydate("1970-01-01"))))))
+covidData$newestPositiveCovidTestDate <-  suppressWarnings(anydate(sapply(covidData$PositiveCovidTestDates, 
+                                                        function(x)(max(days(str_split(x, ",", simplify = TRUE))+anydate("1970-01-01"))))))
+covidData$newestPositiveCovidTestReport <-  suppressWarnings(anydate(sapply(covidData$PositiveCovidTestReportDates, 
+                                                          function(x)(max(days(str_split(x, ",", simplify = TRUE))+anydate("1970-01-01"))))))
+covidData$oldestPositiveCovidTestReport <-  suppressWarnings(anydate(sapply(covidData$PositiveCovidTestReportDates,  
+                                                          function(x)(min(days(str_split(x, ",", simplify = TRUE))+anydate("1970-01-01"))))))
+
+toc()
+
+table(covidData$Reinfection)
+```
+
+
+Parse out some hospitalization, workplace, and pre-existing condition information
+
+MDSS_Symptomatic includes all MDSS symptom variables available
+
+The updated CSTE definition is as follows:
+  â At least two of the following:
+  o fever (measured or subjective),
+  o chills,
+  o rigors,
+  o myalgia,
+  o headache,
+  o sore throat,
+  o nausea or vomiting,
+  o diarrhea,
+  o fatigue,
+  o congestion or runny nose
+  
+  OR
+  
+  â Any one of the following:
+  o cough,
+  o shortness of breath,
+  o difficulty breathing,
+  o new olfactory disorder
+  o new taste disorder
+  o Clinical or radiographic evidence of pneumonia,
+  o Acute respiratory distress syndrome (ARDS)
+
+```{r symptoms ## Samantha Lynn Bell DHD 2020 ##}
+# Make a backup of the deduplicated dataframe with combined disease dates 
+backup <- covidData
+dlg_message("A backup of CovidData has been made - you can revert to this backup by running covidData <- backup at any time.", type = "ok")
+
+covidData <- covidData %>% mutate(
+# Update the part of outbreak variable by using the outbreak ID. Leave out WUHAN19-20
+Part_of_an_outbreak_ = case_when(
+  Part_of_an_outbreak_=="Y" ~"Y",
+  Outbreak_Name != "WUHAN19-20" & !is.na(Outbreak_Name) ~ "Y",
+  !is.na(If_checked__outbreak_name_or_) ~ "Y", 
+  TRUE ~ "U"),
+
+# Combine the hospitalization status columns
+Patient_Hospitalized = case_when(
+  is.na(Patient_Hospitalized) & Case_Disposition=="Inpatient" ~ "Y",
+  is.na(Patient_Hospitalized) & Case_Disposition=="Outpatient" ~ "N",
+  Patient_Hospitalized=="U" ~ "NA",
+  TRUE ~ Patient_Hospitalized),
+# Patient markers
+Has_Patient_Addr_or_Phone = case_when(!is.na(Street_Address)|!is.na(Home_Phone) ~ "Y",
+                                      TRUE ~ "N"),
+CSTE_Symptomatic = case_when(
+  ( (Fever=="Y"|Chills=="Y"|Rigors=="Y"|Muscle_aches__myalgia_=="Y"|Headaches=="Y"|Sore_Throat=="Y"|
+     Nausea=="Y"|Vomiting=="Y"|Diarrhea___gt__3_loose_looser=="Y"|Fatigue_Lethargy_Weakness=="Y"|
+     Runny_nose__rhinorrhea_=="Y"|Congestion__Coryza_=="Y") | 
+    (Fever=="Y"|Chills=="Y"|Rigors=="Y"|Muscle_aches__myalgia_=="Y"|Headaches=="Y"|Sore_Throat=="Y"|
+       Nausea=="Y"|Vomiting=="Y"|Diarrhea___gt__3_loose_looser=="Y"|Fatigue_Lethargy_Weakness=="Y"|
+       Runny_nose__rhinorrhea_=="Y"|Congestion__Coryza_=="Y") ) |
+    (Cough__new_onset_or_worsening=="Y"|Shortness_of_breath__dyspnea_=="Y"|Difficulty_Breathing=="Y"|
+       Loss_of_Taste=="Y"|Loss_of_Smell=="Y"|Evidence_of_Pneumonia=="Y"|Acute_Respiratory_Distress_Sy=="Y") ~ "Y",
+  TRUE ~ "UNK"
+),
+High_Risk_Occupation = case_when(High_risk_work_or_living=="Y" & High_risk_facility_Patient=="EMPLOYEE" ~ "High Risk Facility Worker",
+                       Health_care_worker_in_the_Uni=="Y" ~ "Healthcare Worker USA",
+                       Is_the_patient_a_first_respon =="Y" ~ "First Responder", 
+                       Other_Essential_Worker_Critic=="Y" ~ "Other Essential Worker",
+                       High_risk_work_or_living=="N" & Health_care_worker_in_the_Uni=="N" & Is_the_patient_a_first_respon =="N" & Other_Essential_Worker_Critic=="N" ~ "N",
+                       TRUE ~ "UNK"),
+Hospital_isolation = case_when(Is_was_the_patient_isolated_i=="Y"~"Y",
+                               grepl("\\Wiso|\\Wisolation", Comments_or_Additional_Inform, ignore.case = TRUE) ~ "Y",
+                               !is.na(Hospital_isolation_start_date)~"Y",
+                               !is.na(Hospital_isolation_end_date)~"Y",
+                               TRUE ~ Is_was_the_patient_isolated_i),
+# What best describes where the patient was staying at time of illness onset (or at time of positive test for asymptomatic individuals)
+Where_staying_at_onset = case_when(
+  What_best_describes_where_the == "CONGREGATESETTING"|grepl("group", What_best_describes_where_the, ignore.case = TRUE) ~ "Congregate Setting",
+  What_best_describes_where_the == "HOUSESINGLEFAMILYHOME" ~ "Single-Family Home",
+  What_best_describes_where_the == "APARTMENT" | grepl("flat|unit|studio", What_best_describes_where_the, ignore.case = TRUE) ~ "Apartment",
+  What_best_describes_where_the == "HOTELMOTEL" ~ "Hotel/Motel",
+  What_best_describes_where_the == "OUTSIDENONPERMANENTLOCATION" | 
+    grepl("outside|homeless", What_best_describes_where_the, ignore.case = TRUE) ~ "Outside/No Permanent Location",
+  What_best_describes_where_the == "CORRECTIONAL FACILITY" | 
+    grepl("jail|prison|corrections", What_best_describes_where_the, ignore.case = TRUE) ~ "Correctional Facility",
+  What_best_describes_where_the == "UNK" | grepl("unknown", What_best_describes_where_the, ignore.case = TRUE) ~ "Unknown",
+  What_best_describes_where_the == "MOBILEHOME" | grepl("trailer|mobile home", What_best_describes_where_the, ignore.case = TRUE) ~ "Mobile Home",
+  What_best_describes_where_the == "NURSINGHOME" |
+    grepl("nursing|longterm care", What_best_describes_where_the, ignore.case = TRUE) ~ "Nursing Home",
+  grepl("college|frat|sorority|dorm|school", What_best_describes_where_the, ignore.case = TRUE) ~ "college",
+  grepl("hospital", What_best_describes_where_the, ignore.case = TRUE) ~ "Hospital",
+  grepl("duplex|two.{0,2}family", What_best_describes_where_the, ignore.case = TRUE) ~ "Duplex",
+  grepl("townhouse|townhome", What_best_describes_where_the, ignore.case = TRUE) ~ "Townhouse",
+  grepl("condo", What_best_describes_where_the, ignore.case = TRUE) ~ "Condo",
+  TRUE ~ "Other"
+),
+# Process some of the pre-existing conditions
+ConditionNotes = paste(Information_on_pre_existing_c, Other_clinical_signs),
+Asthma = case_when(
+  grepl("asthma|inhaler|albuterol", ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+COPD = case_when(
+  grepl("COPD|obstructive pulmonary", ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+Hypertension = case_when(
+  grepl("htn|blood pressure|hyper-tension|hypertension", ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+Diabetic = case_when(
+  grepl("\\WDM|diabetic|DM2|diabetes|\\Wdiab|IDDM", ConditionNotes, ignore.case = TRUE) ~ "Y", 
+  TRUE ~ "UNK"),
+Renal_dysfunction = case_when(
+  grepl("kidney transplant|kidney disease|kidney fail|renal|CKD|kidney dys|kidney dis|ESRD|nephropathy|dialysis",
+        ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+Pneumonia = case_when(
+  grepl("pneumonia", ConditionNotes, ignore.case = TRUE)||Evidence_of_Pneumonia=="Y" ~ "Y", 
+  TRUE ~ "UNK"),
+Obese = case_when(
+  grepl("obese|obesity", ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+Other_lung_dysfunction = case_when(
+  grepl("HLD|pulmonary|lung disease", ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+Smoker_Vaper = case_when(  Current_Smoker_=="Y"~ "Y",
+                           Former_Smoker_=="Y" ~ "Y",
+                           Current_vape_user_=="Y" ~ "Y", 
+                           Former_vape_user_ =="Y"~ "Y", 
+                           grepl("smoking|smoker|smokes", ConditionNotes, ignore.case = TRUE) ~ "Y",
+                           TRUE ~ "UNK"),
+Cancer = case_when(
+  grepl("chemotherapy|cancer|leukemia|radiation", ConditionNotes, ignore.case = TRUE) ~ "Y", 
+  TRUE ~ "UNK"),
+Other_Cardiovascular_dysfunction = case_when(
+  grepl("cardiovascular|hyperlipidemia|heart attack|\\WMI|myocardial infarction|heart failure|cardiovascular disease|vascular disease|atrial|ventricular|artery|\\Wstint|\\Wvalve|a-fib|afib|coronary|\\Wstent|fibrillation|CHF|DVT",
+        ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+Bronchitis_Rhinitis = case_when(
+  grepl("common cold|Rhinitis|Bronchitis", ConditionNotes, ignore.case = TRUE)|Runny_nose__rhinorrhea_=="Y" ~ "Y",
+  TRUE ~ "UNK"),
+Apnea = case_when(
+  grepl("apnea|CPAP", ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+Anemia = case_when(
+  grepl("anemia|sickle", ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+Transplant = case_when(
+  grepl("transplant", ConditionNotes, ignore.case = TRUE) ~ "Y",
+  TRUE ~ "UNK"),
+Pre_existing_Conditions = case_when(
+  !is.na(Information_on_pre_existing_c) ~ "Y",
+  Asthma=="Y"|Apnea=="Y"|Anemia=="Y"|COPD=="Y"|Cancer=="Y"|Diabetic=="Y"| Hypertension=="Y"|Other_Cardiovascular_dysfunction=="Y"|Other_lung_dysfunction=="Y"|
+    Pneumonia=="Y"|Obese=="Y"|Bronchitis_Rhinitis=="Y"|Transplant=="Y"| If_female__was_patient_pregna=="Y"|Renal_dysfunction=="Y"|Smoker_Vaper=="Y" ~ "Y",
+  TRUE ~ "U"), 
+Nausea_or_vomiting = case_when(
+  Nausea=="Y"|Vomiting=="Y" ~ "Y",
+  TRUE ~ "UNK")
+)
+# Add occupation free text combination with high risk occupation names - This variable will be used to code occupations
+# If NA or UNK, do not add that variable to the pasted text
+covidData <- covidData %>% mutate(Occupation = case_when(
+  !is.na(Occupations_Grade) & !is.na(Worksites_School) & High_Risk_Occupation!="UNK" ~ paste(Occupations_Grade, Worksites_School, High_Risk_Occupation),
+  is.na(Occupations_Grade) & !is.na(Worksites_School) & High_Risk_Occupation!="UNK"~ paste(Worksites_School, High_Risk_Occupation),
+  !is.na(Occupations_Grade) & is.na(Worksites_School) & High_Risk_Occupation!="UNK" ~ paste(Occupations_Grade, High_Risk_Occupation),
+  !is.na(Occupations_Grade) & !is.na(Worksites_School) & High_Risk_Occupation =="UNK" ~ paste(Occupations_Grade, Worksites_School),
+  is.na(Occupations_Grade) & !is.na(Worksites_School) & High_Risk_Occupation =="UNK" ~ Worksites_School,
+  !is.na(Occupations_Grade) & is.na(Worksites_School) & High_Risk_Occupation =="UNK" ~ Occupations_Grade,
+  is.na(Occupations_Grade) & !is.na(Worksites_School) & High_Risk_Occupation !="UNK" ~ High_Risk_Occupation)
+)
+
+# Combine the two outbreak name fields into a new useable field
+covidData<- covidData %>% mutate(Combined_Outbreak_Name = paste(Outbreak_Name, If_checked__outbreak_name_or_, sep=" & ")) 
+```
+
+Save counts to variables for Census population from 2010 estimates
+(https://datadrivendetroit.org/web_ftp/Census/PlaceProfiles/Detroit_city_MI.pdf and http://censusviewer.com/city/MI/Detroit)
+```{r counts}
+# Add the census counts
+census_all <- 713777
+census_under10 <- 99696
+census_10_19 <- 118337
+census_20_29 <- 97884
+census_30_39 <- 89311
+census_40_49 <- 93042
+census_50_59 <- 96471
+census_60_69 <- 62390
+census_70_79 <- 33178
+census_80_plus <- 23468
+census_60_plus <- 119036
+census_Under60 <- 594741
+census_male <- 337679
+census_female <- 376098
+census_white <- 75758
+census_black <- 590226
+census_all_other <- 47793
+```
+
+Make a table of populations and counts by age, race, sex
+```{r populationTables ## Samantha Lynn Bell DHD 2021 #}
+pops <- c(census_under10, census_10_19, census_20_29, census_30_39, census_40_49, census_50_59, census_60_69, census_70_79, census_80_plus,
+          census_male, census_female, census_white, census_black, census_all_other)
+labels <- c("Under_10", levels(covidData$Age_Range)[3:length(levels(covidData$Age_Range))], "Male", "Female", "White", "Black", "Other")
+
+## Age
+counts <- covidData %>% group_by(Age_Range, Deceased) %>% summarise(cases = n()) %>% mutate(
+  deaths = sum(cases[Deceased=="Deceased"]) # Take the sum of death counts 
+)
+counts <- as_tibble(counts)
+# Get one row for each age range, with case count and death count
+counts <- counts %>% filter(Deceased == "Alive") %>% group_by(Age_Range, cases, deaths) %>% summarise() %>% ungroup()
+# Make the case count the total of alive + dead cases
+counts <- counts %>% mutate(cases = cases+deaths)
+# Make row for under 10 (combined). Remove other rows
+counts <- add_row(counts, Age_Range = "Under_10", cases = sum(counts$cases[1:2]), deaths = sum(counts$deaths[1:2]), .before = TRUE)
+counts <- counts[-which(counts$Age_Range=="1_9"|counts$Age_Range=="Less_than_1"),] # remove the two rows that will be combined
+
+## Sex
+counts2 <- covidData %>% group_by(Patient_Sex, Deceased) %>% summarise(cases = n()) %>% mutate(
+  deaths = sum(cases[Deceased=="Deceased"])) %>% filter(Deceased == "Alive") %>% group_by(Patient_Sex, cases, deaths) %>% summarise() 
+# Make the case count the total of alive + dead cases
+counts2 <- counts2 %>% mutate(cases = cases+deaths)
+counts2 <- as_tibble(counts2)
+
+## Race
+counts3 <- covidData %>% group_by(Simple_Race, Deceased) %>% summarise(cases = n()) %>% mutate(
+  deaths = sum(cases[Deceased=="Deceased"])) %>% filter(Deceased == "Alive") %>% group_by(Simple_Race, cases, deaths) %>% summarise() 
+# Make the case count the total of alive + dead cases
+counts3 <- counts3 %>% mutate(cases = cases+deaths)
+counts3 <- as_tibble(counts3)
+
+## Put them all together for each category
+pop_table <- left_join(as_tibble(cbind(labels[1:9], pops[1:9])), counts, by = c("V1" = "Age_Range")) 
+pop_table2 <- left_join(as_tibble(cbind(labels[10:11], pops[10:11])), counts2, by = c("V1" = "Patient_Sex"))
+pop_table3 <- left_join(as_tibble(cbind(labels[12:14], pops[12:14])), counts3, by = c("V1" = "Simple_Race"))
+```
+
+### CUMULATIVE CASE RATES ###
+This section:
+1-Takes census data from 2010 to get population (Detroit Specific)
+2-Uses these to cumulative calculate case rates for each category as of the analysis date
+
+Rate = (C/P)*100k
+where:
+C = # cases for said demographic
+P = census count for said demographic
+```{r CumulativeCaseRates ## Samantha Lynn Bell DHD 2021 ##}
+# Create a cumulative case rate by sex and by race 
+pop_table$Cumulative_case_rate_all_ages <- (pop_table$cases/as.numeric(pop_table$V2))*100000
+pop_table2$Cumulative_case_rate_sex <- (pop_table2$cases/as.numeric(pop_table2$V2))*100000
+pop_table3$Cumulative_case_rate_race <- (pop_table3$cases/as.numeric(pop_table3$V2))*100000
+```
+
+## CUMULATIVE FATALITY RATES - ALL AGE GROUPS, not a function of death date ##
+Rate = (D/C)*100k
+Where
+D = Number of deaths for this demographic
+C = Number of cases for this demographic
+```{r CumulativeFatalityRates ## Samantha Lynn Bell DHD 2021 ##}
+#Create separate cumulative fatality rates for each group
+pop_table$Cumulative_fatality_rate_all_age_range <- (pop_table$deaths/pop_table$cases)*100000
+pop_table2$Cumulative_fatality_rate_sex <- (pop_table2$deaths/pop_table2$cases)*100000
+pop_table3$Cumulative_fatality_rate_race <- (pop_table3$deaths/pop_table3$cases)*100000
+```
+ 
+# Make cumulative DEATH RATES using census population (as opposed to the fatality rates using case count above)
+1-	Takes census data to get population (Detroit Specific)
+2-	Uses these to calculate cumulative death rates for each category as of the date the analysis is run
+Rate = (D/P)*100k
+where:
+D= # deaths for said demographic
+P = census count for said demographic
+```{r cumulativeDeathRates ## Samantha Lynn Bell DHD 2021 ##}
+#Create separate cumulative death rates for each group
+pop_table$Cumulative_death_rate_all_age_range <- (pop_table$deaths/as.numeric(pop_table$V2))*100000
+pop_table2$Cumulative_death_rate_sex <- (pop_table2$deaths/as.numeric(pop_table2$V2))*100000
+pop_table3$Cumulative_death_rate_race <- (pop_table3$deaths/as.numeric(pop_table3$V2))*100000
+```
+
+AGE ADJUSTED RATES 
+____________________________________________________________________________________________________________
+
+To calculate the age-adjusted CASE rate, the case rate of each age range was first weighted by multiplying it by USA Standard 2000 population percentage for this age range
+The overall age adjusted rate is found by summing these adjusted rates
+
+For n of all unique Age Ranges from Age_Range variable
+â Rate[n] = {((C[1]/P[1])*100k)*W[1]} + {((C[2]/P[2])*100k)*W[2]} + ... 
+where:
+  C = # cases for said demographic
+  P = census count for said demographic
+  W = the weight (percentage in decimal format) of said demographic in the USA Standard 2000 population
+
+____________________________________________________________________________________________________________
+To calculate the age-adjusted DEATH rate, the case rate of each age range was first weighted by multiplying it by USA Standard 2000 population percentage for this age range
+The overall age adjusted rate is found by summing these adjusted rates
+
+For n of all unique Age Ranges from Age_Range variable
+â Rate[n] = {((D[1]/P[1])*100k)*W[1]} + {((D[2]/P[2])*100k)*W[2]} + ... 
+where:
+  D = # cases for said demographic
+  P = census count for said demographic 
+  W = the weight (percentage in decimal format) of said demographic in the USA Standard 2000 population
+  
+____________________________________________________________________________________________________________
+  
+Or, to simplify:
+Age-Adjusted Rate = Sum of(Age-specific Rate * Population Weight)
+
+```{r AgeAdjustedRates ## Samantha Lynn Bell DHD 2020 ##}
+# USA Standard 2000 population percentage added to the population table and assigned to each age category it belongs to
+weights <- as_tibble(cbind( standard_population_weight = c(0.1416685479, 0.1452005215, 0.1310070858, 0.1518056759, 0.1539685545, 0.111169775, 0.0730572325, 0.0587727666, 0.0333498401), 
+                 category = c("Under_10", "10_19", "20_29", "30_39", "40_49", "50_59", "60_69", "70_79", "80_plus")))
+pop_table <- left_join(pop_table, weights, by = c("V1" = "category")) 
+pop_table$standard_population_weight <- as.numeric(pop_table$standard_population_weight)
+
+# Make the age-adjusted Case and Death rates
+pop_table$Age_Adjusted_Case_Rate <- pop_table$Cumulative_case_rate_all_ages*pop_table$standard_population_weight
+pop_table$Age_Adjusted_Death_Rate <- pop_table$Cumulative_death_rate_all_age_range*pop_table$standard_population_weight
+```
+
+
+
+Combine the tables, add the rates to the main dataframe, and make total rates
+```{r totalRates ## Samantha Lynn Bell DHD 2021 ##}
+# Put all of the population and rate tables together into one
+pop_table_all <- full_join(pop_table, pop_table2, by = c("V1", "V2", "cases", "deaths")) %>% 
+  full_join(., pop_table3, by = c("V1", "V2", "cases", "deaths"))
+names(pop_table_all) <- c("Category", "Population", names(pop_table_all)[3:16])
+# Take out the standard weights column
+pop_table_all <- pop_table_all %>% select(-standard_population_weight)
+pop_table_all
+
+# Make a total positive column
+pop_table_all$total_positive <- pop_table_all$cases + pop_table_all$deaths
+
+# Round the rates
+pop_table_all <- pop_table_all %>% mutate_if(is.numeric, round)
+
+# Age rates join
+covidData <- left_join(covidData, pop_table_all[pop_table_all$Category %in% unique(covidData$Age_Range),], by = c("Age_Range" = "Category"))
+
+# Add cumulative rates to the main data
+covidData$Cumulative_case_rate_all_ages <- (dim(covidData)[1]/census_all)*100000
+covidData$Cumulative_fatality_rate_all_age_range <- (dim(covidData[covidData$Deceased=="Deceased",])[1]/dim(covidData)[1])*100000
+covidData$Cumulative_death_rate_all_age_range <- (dim(covidData[covidData$Deceased=="Deceased",])[1]/census_all)*100000
+
+# Add cumulative rates to the rate table
+newRow <- as_tibble(t(data.frame(x=c( # make a tibble from a transformed dataframe with named variables
+   Category = "Cumulative",
+   Population = as.character(paste(census_all)),
+   cases = dim(covidData[covidData$Deceased=="Alive",])[1], 
+   deaths = dim(covidData[covidData$Deceased=="Deceased",])[1], 
+   Cumulative_case_rate_all_ages = median(covidData$Cumulative_case_rate_all_ages), 
+   Cumulative_fatality_rate_all_age_range = median(covidData$Cumulative_fatality_rate_all_age_range),
+   Cumulative_death_rate_all_age_range = median(covidData$Cumulative_death_rate_all_age_range),
+   Age_Adjusted_Case_Rate = sum(pop_table_all$Age_Adjusted_Case_Rate),
+   Age_Adjusted_Death_Rate = sum(pop_table_all$Age_Adjusted_Death_Rate),
+   Cumulative_case_rate_sex = NA,
+   Cumulative_fatality_rate_sex = NA,
+   Cumulative_death_rate_sex = NA,
+   Cumulative_case_rate_race = NA, 
+   Cumulative_fatality_rate_race = NA,
+   Cumulative_death_rate_race = NA
+   )))) %>% mutate_all(., as.character)
+
+pop_table_all <- pop_table_all %>% mutate_all(., as.character) %>% add_row(., newRow) 
+pop_table_all
+```
+
+### RATE OF FATALITIES - ASSIGNED TO EACH FATALITY###
+This section makes case fatality rates which are applied to the matching combined death date of deceased patients
+
+The case fatality rate for each date is determined by:
+(D/C)*100
+
+D = Total number of deaths with a date of death up to and including that date
+C = Total number of cases with a combined disease date up to and including that date (the earliest record of the positive case in our system)
+
+________________________
+What is the code doing?
+________________________
+
+For each disease date, we capture date x. Then the following happens:
+
+1- The number of Positives in each category is counted as all confirmed cases in that category on or before date x
+2- The number of Deaths in each category is counted as all deceased confirmed cases with the reported date of death on or before date x
+3- The rate for each category is calculated as (deaths/positives)*100
+4- The rate is added to the deceased patient row for which the combined death date is x
+   (in this way, we are calculating the fatality rate for the day that the patient died, and that rate is assigned to them)
+5- Number of positives are assigned to each row with matching combined disease date x
+6- Number of deaths are assigned to each row with matching combined death date x
+```{r fatalities ## Samantha Lynn Bell DHD 2020 ##}
+# Start with empty NA columns
+covidData$Fatality_Rate_Sex <- rep(NA_real_, length(covidData$InvestigationID))
+covidData$Fatality_Rate_Age <- rep(NA_real_, length(covidData$InvestigationID))
+
+cat("Making date-specific fatality rates")
+pb <- txtProgressBar(min = 0, max = length(sort(unique(covidData$Combined_Disease_Date))), style = 3) # set up progess bar
+for(i in 1:length(sort(unique(covidData$Combined_Disease_Date)))){
+  # This date
+  date <- anydate(as.character(sort(unique(covidData$Combined_Disease_Date))[i]))  
+  # ALl the dates
+  CDD <- anydate(as.character(covidData$Combined_Disease_Date))
+  Death_date <- anydate(covidData$Combined_Death_Date)
+  
+  if(!is.na(date)&(as.character(date)!="NA")){
+  # Count totals as of this chosen date
+  positives <- dim(covidData[covidData$Case_Status == "Confirmed" & CDD<=date,])[1]
+  female    <- dim(covidData[covidData$Patient_Sex == "Female" & covidData$Case_Status == "Confirmed" & CDD<=date,])[1]
+  male      <- dim(covidData[covidData$Patient_Sex == "Male" & covidData$Case_Status == "Confirmed" & CDD<=date,])[1]
+  Under60   <- dim(covidData[!is.na(covidData$Age_In_Years) & covidData$Age_In_Years < 60 & covidData$Case_Status == "Confirmed" & CDD<=date,])[1]
+  Over60    <- dim(covidData[!is.na(covidData$Age_In_Years) & covidData$Age_In_Years >= 60 & covidData$Case_Status == "Confirmed" & CDD<=date,])[1]
+  # Count deaths as of this chosen date
+  DeadPos     <- dim(covidData[covidData$Case_Status == "Confirmed" & covidData$Deceased == "Deceased" & Death_date <=date, ])[1]
+  DeadFemale  <- dim(covidData[covidData$Patient_Sex == "Female" & covidData$Case_Status == "Confirmed" & covidData$Deceased == "Deceased" &
+                                 Death_date <=date,])[1]
+  DeadMale    <- dim(covidData[covidData$Patient_Sex == "Male" & covidData$Case_Status == "Confirmed" & covidData$Deceased == "Deceased" &
+                                 Death_date <=date,])[1]
+  DeadOver60  <- dim(covidData[!is.na(covidData$Age_In_Years) & covidData$Age_In_Years >= 60 & covidData$Case_Status == "Confirmed" &
+                                 covidData$Deceased == "Deceased" & Death_date <=date,])[1]
+  DeadUnder60 <- dim(covidData[!is.na(covidData$Age_In_Years) & covidData$Age_In_Years < 60 & covidData$Case_Status == "Confirmed" &
+                                 covidData$Deceased == "Deceased" & Death_date <=date,])[1]
+  # Calculate rates of fatality for this date
+  frFemale <- (DeadFemale/female)*100
+  frPos    <- (DeadPos/positives)*100
+  frMale   <- (DeadMale/male)*100
+  frUnder  <- (DeadUnder60/Under60)*100
+  frOver   <- (DeadOver60/Over60)*100
+  
+  # Add rate and counts to the row for this date
+  covidData <- covidData %>% mutate(
+    Fatality_Rate_Sex = case_when(
+      Patient_Sex == "Female" & Deceased == "Deceased" & anydate(Combined_Death_Date)  == anydate(date) ~ frFemale,
+      Patient_Sex == "Male" & Deceased == "Deceased" & anydate(Combined_Death_Date)  == anydate(date) ~ frMale,
+      Patient_Sex == "Unknown" & Deceased == "Deceased" & anydate(Combined_Death_Date)  == anydate(date) ~ NA_real_ ,
+      TRUE ~ as.numeric(Fatality_Rate_Sex)
+    ),
+    Fatality_Rate_Age = case_when(
+      !is.na(Age_In_Years) & Age_In_Years < 60 & Deceased == "Deceased" & anydate(Combined_Death_Date)  == anydate(date) ~ frUnder,
+      !is.na(Age_In_Years) & Age_In_Years >= 60 & Deceased == "Deceased" & anydate(Combined_Death_Date)  == anydate(date) ~ frOver,
+      Age_In_Years == "NA" & Deceased == "Deceased" & anydate(Combined_Death_Date)  == anydate(date) ~ NA_real_,
+      TRUE ~ as.numeric(Fatality_Rate_Age)
+    )
+  )
+  covidData$Number_Positive_by_This_date[CDD==date] <- positives
+  covidData$Number_Female_Pos_by_This_Date[CDD==date] <- female
+  covidData$Number_Male_Pos_by_This_Date[CDD==date] <- male
+  covidData$Number_Female_Dead_by_This_Date[Death_date ==date & covidData$Deceased == "Deceased"] <- DeadFemale
+  covidData$Number_Male_Dead_by_This_Date[Death_date ==date & covidData$Deceased == "Deceased"] <- DeadMale
+  covidData$Number_Over60_Pos_by_This_Date[CDD==date] <- Over60
+  covidData$Number_Under60_Pos_by_This_Date[CDD==date] <- Under60
+  covidData$Number_Over60_Dead_by_This_Date[Death_date ==date & covidData$Deceased == "Deceased"] <- DeadOver60
+  covidData$Number_Under60_Dead_by_This_Date[Death_date ==date & covidData$Deceased == "Deceased"] <- DeadUnder60
+  }
+  setTxtProgressBar(pb, i)                                   
+}
+```
+
+
+Get the case and death total counts for each zip code
+
+Also get case and death counts for specific time frames
+  # System date minus these ranges give one extra date to account for the analysis date being incomplete and not having any combined disease dates on this day. 
+  # For example, Sys.Date()-14 = a day 15 days ago
+```{r zipCounts ## Samantha Lynn Bell DHD 2020 ##}
+#This list of population count corresponds to the list Zip_Code. Population data by zip was pulled from block level 2010 Census data by Jimmy McBroom and then:
+# -It was rolled up to the zip/clipped to the city zip codes.
+# -For zips shared with other jurisdictions, this means that our population data should only include Detroit residents.
+Zip_Code_2010<- c("48201", "48202", "48203", "48204", "48205", "48206", "48207", "48208", "48209", "48210", "48211", "48212", "48213", "48214", "48215", "48216", "48217",
+                   "48219", "48221", "48223", "48224", "48226", "48227", "48228", "48234", "48235", "48236", "48238", "48239", "48240")
+zip_total_clipped <- c(12892, 16617, 17638, 28471, 43552, 22584, 19428, 9557, 31859, 31348, 6037, 17629, 27740, 24018, 12458, 6170, 8210,
+                       47217, 38506, 24794, 45096, 5209, 45289, 51939, 36204, 44593, 1983, 31351, 4518, 405)
+zipPopTable <- data.frame(Zip_Code_2010, zip_total_clipped)
+
+# organize the zip code population information 
+zipPopTable$Zip_Code_2010 <- as.character(zipPopTable$Zip_Code_2010)
+
+# Get the case and death counts for each zip code
+zipSummary <- covidData %>% filter(!is.na(Patient_Address_Only)) %>% group_by(Simple_Investigation_Zip, Deceased) %>% summarise(cases = n()) %>% # summarize counts alive vs dead
+  mutate(Zip_death_count_All = sum(cases[Deceased=="Deceased"])) %>% # tally the deaths
+  mutate(Zip_case_count_All = Zip_death_count_All+cases) %>% # tally the total cases alive + dead
+  filter(Deceased == "Alive") %>% group_by(Simple_Investigation_Zip, Zip_case_count_All, Zip_death_count_All) %>% summarise() # clean up the rows to one row per zip
+zipSummary <- as_tibble(zipSummary)
+
+# Get the case counts and death counts for certain time periods
+fourteen <- covidData %>% filter(difftime(Sys.Date(), Combined_Disease_Date, units = "days")<=14) %>% # filter for time period
+  group_by(Simple_Investigation_Zip , Deceased) %>% summarise(cases=n()) %>% # summarize counts alive vs dead
+  mutate(Zip_death_count_14 = sum(cases[Deceased=="Deceased"])) %>% # tally the deaths
+  mutate(Zip_case_count_14 = cases+Zip_death_count_14) %>% # the total cases alive + dead
+  filter(Deceased == "Alive") %>% group_by(Simple_Investigation_Zip, Zip_case_count_14, Zip_death_count_14) %>% summarise() # clean up the rows to one row per zip
+
+thirty <- covidData %>% filter(difftime(Sys.Date(), Combined_Disease_Date, units = "days")<=30) %>% # filter for time period
+  group_by(Simple_Investigation_Zip , Deceased) %>% summarise(cases=n()) %>% # summarize counts alive vs dead
+  mutate(Zip_death_count_30 = sum(cases[Deceased=="Deceased"])) %>% # tally the deaths
+  mutate(Zip_case_count_30 = cases+Zip_death_count_30) %>% # the total cases alive + dead
+  filter(Deceased == "Alive") %>% group_by(Simple_Investigation_Zip, Zip_case_count_30, Zip_death_count_30) %>% summarise() # clean up the rows to one row per zip
+
+sixty <- covidData %>% filter(difftime(Sys.Date(), Combined_Disease_Date, units = "days")<=60) %>% # filter for time period
+  group_by(Simple_Investigation_Zip , Deceased) %>% summarise(cases=n()) %>% # summarize counts alive vs dead
+  mutate(Zip_death_count_60 = sum(cases[Deceased=="Deceased"])) %>% # tally the deaths
+  mutate(Zip_case_count_60 = cases+Zip_death_count_60) %>% # the total cases alive + dead
+  filter(Deceased == "Alive") %>% group_by(Simple_Investigation_Zip, Zip_case_count_60, Zip_death_count_60) %>% summarise() # clean up the rows to one row per zip
+
+ninety <- covidData %>% filter(difftime(Sys.Date(), Combined_Disease_Date, units = "days")<=90) %>% # filter for time period
+  group_by(Simple_Investigation_Zip , Deceased) %>% summarise(cases=n()) %>% # summarize counts alive vs dead
+  mutate(Zip_death_count_90 = sum(cases[Deceased=="Deceased"])) %>% # tally the deaths
+  mutate(Zip_case_count_90 = cases+Zip_death_count_90) %>% # the total cases alive + dead
+  filter(Deceased == "Alive") %>% group_by(Simple_Investigation_Zip, Zip_case_count_90, Zip_death_count_90) %>% summarise() # clean up the rows to one row per zip
+
+# Combine the counts all together
+zipSummary <- left_join(zipSummary, fourteen, by = "Simple_Investigation_Zip") %>% left_join(., thirty, by = "Simple_Investigation_Zip") %>% 
+  left_join(., sixty, by = "Simple_Investigation_Zip") %>% left_join(., ninety, by = "Simple_Investigation_Zip")
+# Combine the counts into the zip pop table
+zipPopTable <- left_join(zipPopTable, zipSummary, by = c("Zip_Code_2010" ="Simple_Investigation_Zip")) %>% mutate(
+  date_updated = Sys.Date()
+)
+```
+
+Case rates by zip code
+Crude case and death rates are created for each zip code
+
+## Calculate TOTAL case and death rates for each zip code
+Cases: 
+For each zip, the rate was calculated by
+Zip_case_rate = (C/P)*100000 # rate per 100k
+where:
+C = the case count of confirmed (Case Status = Confirmed) cases matching a simple investigation zip to the zip code from the population table
+P = the population count   
+
+Deaths: 
+For each zip 
+Zip_death_rate = (D/P)*100000 # rate per 100k
+where:
+D = the count of confirmed (Case Status = Confirmed) cases with Deceased variable = "Deceased" and matching a simple investigation zip to the zip code from the population table
+P = the population count from the table for that zip code
+
+## Calculate case and death rates for each zip under specific date ranges
+  System date minus these dates ranges give one extra date to account for the analysis date being incomplete and not having any combined disease dates on this day. 
+  For example, Sys.Date()-14 = a day 15 days ago
+
+```{r zipRates}
+# Make any low counts zero so they are suppressed
+zipPopTable[zipPopTable<16] <- 0
+
+## Calculate TOTAL case and death rates for each zip code
+zipPopTable$Zip_case_rate_All <- (zipPopTable$Zip_case_count_All/zipPopTable$zip_total_clipped)*100000
+zipPopTable$Zip_death_rate_All <- (zipPopTable$Zip_death_count_All/zipPopTable$zip_total_clipped)*100000
+
+## Calculate case and death rates for each zip under specific date ranges
+zipPopTable$Zip_case_rate_14 <- (zipPopTable$Zip_case_count_14/zipPopTable$zip_total_clipped)*100000
+zipPopTable$Zip_death_rate_14 <- (zipPopTable$Zip_death_count_14/zipPopTable$zip_total_clipped)*100000
+zipPopTable$Zip_case_rate_30 <- (zipPopTable$Zip_case_count_30/zipPopTable$zip_total_clipped)*100000
+zipPopTable$Zip_death_rate_30 <- (zipPopTable$Zip_death_count_30/zipPopTable$zip_total_clipped)*100000
+zipPopTable$Zip_case_rate_60 <- (zipPopTable$Zip_case_count_60/zipPopTable$zip_total_clipped)*100000
+zipPopTable$Zip_death_rate_60 <- (zipPopTable$Zip_death_count_60/zipPopTable$zip_total_clipped)*100000
+zipPopTable$Zip_case_rate_90 <- (zipPopTable$Zip_case_count_90/zipPopTable$zip_total_clipped)*100000
+zipPopTable$Zip_death_rate_90 <- (zipPopTable$Zip_death_count_90/zipPopTable$zip_total_clipped)*100000
+
+# Save a non-suppressed version
+write.xlsx(zipPopTable, paste0(location, "/For internal Tableau reporting/", "Zip_Rates.xlsx"), overwrite = T) 
+write.xlsx(zipPopTable, paste0(outputLocation, "/", Sys.Date(), "_Full Zip_Rates.xlsx"), overwrite = T) 
+
+# Make a special file for the internal dashboard
+mayorDashZips <- zipPopTable %>% rename(
+  zips = Zip_Code_2010,
+  `covidData$Today[1]` = date_updated 
+)
+
+# Hide counts under 16
+zipPopTable[zipPopTable<16] <- "Suppressed"
+
+# Round all rates to whole numbers
+zipPopTable <- zipPopTable %>% mutate_if(is.numeric, round)
+```
+
+On 1st monday of each month, 2 things happen:
+1) New Zip Rates file is saved to the Public Dashboard folder, allowing for the maps to be updated online
+2) A separate zip rate file cleaned and printed to data portal box folder for public access
+
+# For ease of calculation, we look at:
+  - if the weekday is Monday
+  - if the day of the month is within the 1st 7 days (no other Monday has occurred in this month yet)
+# The user is prompted for optional printing of the file if it is a Tuesday within the first 8 days of the month (to account for potential missed 1st Monday due to holiday or other analysis issues â The first Monday may have been day 1-7, and if missed the first Tuesday following the first Monday may be up to day 8.)
+```{r publicZipFile}
+# Make special file for the data portal
+dataPortalRates <- zipPopTable %>% select(Zip_Code_2010, zip_total_clipped, Zip_case_count_All, Zip_death_count_All, Zip_case_rate_All, Zip_death_rate_All, date_updated) %>% rename(
+  ZIP_Code = Zip_Code_2010,
+  Clipped_ZIP_Population = zip_total_clipped,
+  ZIP_Case_Count = Zip_case_count_All,
+  ZIP_Death_Count = Zip_death_count_All,
+  ZIP_Case_Rate = Zip_case_rate_All,
+  ZIP_Death_Rate = Zip_death_rate_All
+) %>%
+  # Filter out the partial zip codes
+  filter(!(ZIP_Code %in% c("48240", "48236", "48239")))
+
+
+
+# Get the weekday and week of the month
+weekday <- weekdays(Sys.Date())
+d <- day(Sys.Date())
+
+# If it is the first monday of the month, print the file and notify the user
+if(weekday=="Monday" & d<=7){
+  write.csv(dataPortalRates, paste0(dataPortalFilesBox, "/", "Detroit City COVID Confirmed Cases and Rates by ZIP Code.csv"),row.names=FALSE)
+  write.xlsx(zipPopTable, paste0(location, "/PUBLIC DASHBOARD FILES/", "Zip_Rates.xlsx"), overwrite=T) 
+  dlg_message(message = "The zip rates file was successfully printed to both the dashboard folder and the public data portal.\nThis file will sync to the webpage at 2pm today.", type = "ok")}
+
+# If it is a tuesday falling on day 2-8 of the month, check if the file was printed already for this month
+if(weekday=="Tuesday" & d<=8 & d>1){
+  did_print <- dlg_input(
+    message = "It is the beginning of the month, did you already update the zip rates file for both the public dashboard and public data portal (yes or no)?\n[This is automatically done if the code is run on the 1st Monday of the month]", type = "yesno")$res
+  # If the file was not printed on the first monday (due to holiday, etc), ask if the user would like to print it now
+  if(did_print=="no"){
+    should_print <- dlg_message(message = "Would you like to print the zip rates file now?", type = "yesno")$res
+    if(should_print == "yes"){
+      write.csv(dataPortalRates, paste0(dataPortalFilesBox, "/", "Detroit City COVID Confirmed Cases and Rates by ZIP Code.csv"),row.names=FALSE)
+      write.xlsx(zipPopTable, paste0(location, "/PUBLIC DASHBOARD FILES/", "Zip_Rates.xlsx"), overwrite=T) 
+      dlg_message(message = "The zip rates file was successfully printed to both the dashboard folder and the public data portal.\nThis file will sync to the webpage at 2pm today.", type = "ok")}
+  }
+}
+```
+
+
+Generate CHECC report figure on Thursdays
+```{r CHECC}
+if(weekdays(Sys.Date()) == "Thursday"){
+  covidData$days_past <- Sys.Date() - as.Date(covidData$Referral_Date)
+  #Subset to past 5 weeks; create variable to mark each week Fridays-Thursdays
+  wk_grp <- covidData %>% filter(days_past<35) %>% 
+    mutate(wk_days =
+             case_when(days_past<7 ~ 5, 
+                       days_past>=7 & days_past<14 ~ 4, 
+                       days_past>=14 & days_past<21 ~ 3,
+                       days_past>=21 & days_past<28 ~ 2,
+                       days_past>=28 & days_past<35 ~ 1))
+  #Label Weeks
+  wk_grp$wk_days <- factor(wk_grp$wk_days, 
+                           levels = c(1, 2, 3, 4, 5),
+                           labels = c("Wk-5", "Wk-4", "Wk-3", "Wk-2", "Past Week"))
+  #Group by weeks Fridays-Thursdays; Count cases per week
+  wk_grp1 <- wk_grp %>% group_by(wk_days) %>% 
+    summarize(cases = n()) 
+  #Plot Referrals by Week
+  plot1 <- ggplot(wk_grp1, aes(x=wk_days, y=cases)) +
+              geom_col(fill="dark green") +
+              theme_classic() +
+              geom_label(aes(label=cases)) +
+              xlab("Past 5 Weeks") +
+              ylab("Cases (n)") +
+              ggtitle("Referrals per Week") +
+              scale_y_continuous() +
+              scale_x_discrete()
+  #Print plot
+  plot1
+  #Export Plot
+  location2 <- str_split(location, "Data", simplify = TRUE)[,1] # Get the beginning of the S or Z drive location
+  ggsave(paste0(location2, "Projects/COVID-19/CHEC Situation Report/Referred cases graph/", Sys.Date(), "_referrals_per_week.png"))
+}
+```
+
+Create address extract
+```{r addresses ## Samantha Lynn Bell DHD 2020 ##}
+# Addresses of investigations- positive only, for maps and facility investigations
+add <- covidData[covidData$Case_Status=="Confirmed",] %>% select(Referral_Date,Combined_Outbreak_Name, InvestigationID, Deceased, Case_Status, Patient_Address_Only, City, State, Simple_Investigation_Zip, Investigation_Addr_Geo_X, Investigation_Addr_Geo_Y, Investigation_Addr_Geo_Source) %>% 
+  # Remove addresses with missing Patient_Address_Only variable (This variable has already been cleaned above for valid addresses)
+  filter(!is.na(Patient_Address_Only))
+
+# Positive addresses within the past 21 days
+add_21days <- add %>% filter(Referral_Date>(Sys.Date()-22))
+```
+
+Count the number of close contacts per person
+```{r Contacts ## Samantha Lynn Bell DHD 2020 ##}
+CC <- covidData %>% select(InvestigationID, First003, Case_Status, Investigation_Status, Referral_Date, High_risk_work_or_living)
+count <- c()
+for(i in 1:length(CC$First003)){
+  count[i] <- length(as.list(str_split(CC$First003[i], "\\[\\d\\]"))[[1]])
+  if(grepl("\\[\\d\\]", CC$First003[i])){
+    count[i] <- length(as.list(str_split(CC$First[i], "\\[\\d\\]"))[[1]])-2
+  }
+}
+CC <- cbind(CC, count) 
+CC$count[is.na(CC$First003)] <- "NA"
+CC <- CC %>% select(-First003)
+
+# Add to the full data
+covidData <- CC %>% select(InvestigationID, count) %>% left_join(covidData, ., by="InvestigationID") %>% mutate(Number_of_Close_Contact = count) %>% select(-count)
+```
+
+
+Make the cleaned up version of the full dataset, with select columns
+Make other subsets for export
+```{r cleanExports  Samantha Lynn Bell DHD 2021 ##}
+# remove the backup to make room in the environment
+rm(backup)
+
+#----------------------------------------------
+# Full cleaned dataframe 
+clean <- covidData %>% select(Today, AnalysisDate, ThirtyDate, FourteenDate, Diagnosis_Date, flag_for_deduplication, Investigation_Addr_Geo_X, Investigation_Addr_Geo_Y, NinetyDate, Case_Status, Case_Updated_Date, Combined_Disease_Date, PositiveCovidTestReportDates, oldestPositiveCovidTestDate, newestPositiveCovidTestDate, newestPositiveCovidTestReport, oldestPositiveCovidTestReport, First_Record_This_Patient, InvestigationID, Patient_ID_Count, Case_Disposition, Patient_Status, Date_of_Death, Combined_Death_Date, State, Patient_Sex, Patient_Race, Simple_Race, Hispanic_Ethnicity, Arab_Ethnicity, Hospital, Simple_Investigation_Zip, Age_Range, Age_Range2, Age_In_Years, Deceased, Fatality_Rate_Sex, Fatality_Rate_Age, Number_Positive_by_This_date, Number_Female_Pos_by_This_Date, Number_Male_Pos_by_This_Date, Number_Over60_Pos_by_This_Date, Number_Under60_Pos_by_This_Date, Number_Female_Dead_by_This_Date, Number_Male_Dead_by_This_Date, Number_Over60_Dead_by_This_Date, Number_Under60_Dead_by_This_Date, Outbreak_Name, Combined_Outbreak_Name, Hospital, Patient_Admitted_to_ICU, Part_of_an_outbreak_, Patient_Hospitalized, CSTE_Symptomatic, Hospital_isolation, Asthma, COPD, Hypertension, Diabetic, Renal_dysfunction, Pneumonia, Obese, Other_lung_dysfunction, Smoker_Vaper, Cancer, Other_Cardiovascular_dysfunction, Bronchitis_Rhinitis, Apnea, Anemia, Transplant, Pre_existing_Conditions, Days_Hospitalized, Patient_Admitted_to_ICU, Fever, Chills, Rigors, Muscle_aches__myalgia_, Runny_nose__rhinorrhea_, Sore_Throat, Cough__new_onset_or_worsening, Shortness_of_breath__dyspnea_, Nausea, Vomiting, Headaches, Abdominal_pain, Diarrhea___gt__3_loose_looser, Fatigue_Lethargy_Weakness, Congestion__Coryza_, Encephalopathy_Encephalitis, Wheezing, Difficulty_Breathing, Chest_Pain, Loss_of_Taste, Loss_of_Smell, Evidence_of_Pneumonia, Confirmatory_Chest_X_ray_or_C, Seizure, Multi_organ_Dysfunction_Syndr, Acute_Respiratory_Distress_Sy, Toxic_state__Sepsis_, Stroke_Venous_Thromboembolism, Multisystem_Inflammatory_Synd, Nausea_or_vomiting, Travel_to_non_U_S__country_, Country, Travel_to_states_and_U_S__cit, Travel_within_Michigan, Date_of_First_Interview_Attem, Current_Interview_Status, Date_of_interview, Subject_has_no_close_contacts, High_risk_work_or_living, Referral_Date, High_Risk_Occupation, Has_Patient_Addr_or_Phone,Case_is_a_household_contact_t,Case_is_a_community_contact_t, Multisystem_Inflammatory_Synd, Difficulty_Breathing,Travel_on_cruise_ship_or_vess, Travel_via_airport_airline, Spent_time_at_worksite, Spent_time_at_adult_congregat, Spent_time_at_a_school__unive, Spent_time_at_a_correctional_, Attended_a_community_event_or, Was_quarantined_at_onset, Where_staying_at_onset, High_risk_facility_Patient, High_risk_live_or_work_facility, Case_is_a_health_care_contact, Case_is_associated_with_a_kno, Source_of_case_s_COVID_19_inf, Community_event_or_mass_gathe,  Subject_refused_to_provide_co, Had_Contact_With_Positive_Animal, Has_the_patient_been_to_a_daycare, Number_of_Close_Contact, Was_the_patient_vaccinated_pe, Vaccinated_, Vaccination_doses_prior_to_il, Vaccine_Type, Administered_Date, Manufacturer) %>% mutate(Age_Range = as.factor(Age_Range), Age_Range2 = as.factor(Age_Range2))
+
+#----------------------------------------------
+# Operational metrics for mayor's dashboard
+field_names <- c("Metric Dersciption", "Positive Responses", "Total cases", "Percent (%)", "Time period - Start", "Time period - End", "Estimation Date")
+#Percentage of cases in the past 14 days with a completed interview, with buffer of 4 days
+Interview <- clean %>% filter(between(Referral_Date, Sys.Date() - 14, Sys.Date() - 4)) %>% mutate( 
+  completed_int = case_when( 
+    !is.na(Date_of_interview) ~ 1,
+    TRUE ~ 0 )
+  )
+Complete_interviews <- c("Percentage of cases in the past 14 days with a completed interview", sum(Interview$completed_int == 1),
+                         length(Interview$completed_int),
+                         round((sum(Interview$completed_int == 1)/length(Interview$completed_int))*100,digits = 2),
+                         format(Sys.Date() - 14, "%b %d"),
+                         format(Sys.Date() - 4, "%b %d"),
+                         paste0(Sys.Date()))
+#Percentage of past 2 days' cases with an attempted interview date, with buffer 2 days
+Attempted <- clean %>% filter(between(Referral_Date, Sys.Date() - 3, Sys.Date() - 2)) %>%  mutate( 
+  attempted_int = case_when(
+    !is.na(Date_of_First_Interview_Attem) ~ 1,
+    TRUE ~ 0)
+  )
+Attempted_interviews <- c("Percentage of past 2 days' cases with an attempted interview date", 
+                          sum(Attempted$attempted_int == 1),length(Attempted$attempted_int),
+                          round((sum(Attempted$attempted_int == 1)/length(Attempted$attempted_int))*100,digits = 2),
+                          format(Sys.Date() - 3, "%b %d"),
+                          format(Sys.Date() - 2, "%b %d"),
+                          paste0(Sys.Date())) 
+Operational_metrics <- as.data.frame(rbind(Complete_interviews,Attempted_interviews))
+colnames(Operational_metrics) <- field_names
+#----------------------------------------------
+# Public data file for public website dashboard
+PublicCOVID <- covidData[covidData$Case_Status=="Confirmed",] %>% select(
+Case_Status, Deceased, Date_of_Death, Combined_Disease_Date, Patient_Race, Hispanic_Ethnicity, Case_Entry_Date, County, State, Patient_Sex, Age_Range, Today, AnalysisDate)
+
+#----------------------------------------------
+# Public data file for Mayor's dashboard
+PublicCOVID_mayor <- covidData[covidData$Case_Status=="Confirmed",] %>% select(
+Case_Status, Deceased, Date_of_Death, Combined_Disease_Date, Referral_Date, Patient_Race, Hispanic_Ethnicity, Case_Entry_Date, County, State, Patient_Sex, Age_Range, Today, AnalysisDate, Date_of_First_Interview_Attem, Date_of_interview, Has_Patient_Addr_or_Phone, Attended_a_community_event_or, Travel_on_cruise_ship_or_vess,Travel_via_airport_airline)
+#----------------------------------------------
+# Public data file for school adminstration reporting
+SchoolCOVID <- covidData[covidData$Case_Status=="Confirmed",] %>% select(
+Case_Status, Deceased, Combined_Disease_Date, Today, Case_is_a_health_care_contact, Case_is_associated_with_a_kno, Source_of_case_s_COVID_19_inf, Case_is_a_household_contact_t,Case_is_a_community_contact_t, Spent_time_at_worksite, Spent_time_at_adult_congregat, Spent_time_at_a_school__unive, Spent_time_at_a_correctional_, Attended_a_community_event_or, Was_quarantined_at_onset, Had_Contact_With_Positive_Animal, Has_the_patient_been_to_a_daycare)
+#----------------------------------------------
+# Deaths data - NOTE THAT THIS USES THE PATIENT STATUS DATE, NOT THE COMBINED DATE (at request of mayor's team)
+deaths <- covidData  %>% filter(
+  (Deceased == "Deceased") & Case_Status == "Confirmed"
+) %>% select(InvestigationID, Hospital, Patient_Sex, Patient_Race, Age_Range, Patient_Status_Date, Date_of_Death, Combined_Death_Date,Combined_Outbreak_Name)
+deathsByDate <- deaths %>% group_by(Date_of_Death) %>% summarise(Number_of_Deaths = n())
+#----------------------------------------------
+# Report of deceased patients with incomplete deceased status in their record (one of the 3 marks is missing)
+incompleteD <- covidData %>% filter((Patient_Status == "D" | Case_Disposition =="D"| Patient_Died == "Died")& (Patient_Status != "D" | Case_Disposition !="D"| Patient_Died != "Died")) %>% select(
+  InvestigationID, Patient_Died, Patient_Status, Case_Disposition, Patient_Status_Date, Date_of_Death)
+#----------------------------------------------
+# Write a list of occupations (in two columns) for entry into Nioccs/NIOSH occupation coding system
+occupations <- covidData %>% filter(!is.na(Occupation)) %>% select(InvestigationID, Occupation) %>% left_join(covidData[,c("InvestigationID", "Occupation")], by="InvestigationID")
+occupations_short <- covidData %>% filter(!is.na(Occupation) & anydate(Referral_Date)>Sys.Date()-90) %>% select(InvestigationID, Occupation)  #  short version 
+```
+
+** Save files all at once to the main dated analysis folder **
+```{r saveInBulk  ## Samantha Lynn Bell DHD 2021 ##}
+  c <- dim(covidData)[1]
+  d <- dim(covidData%>%filter(Deceased=="Deceased"))[1]
+  message2 <- capture.output(cat("The total case count is", c, " and the total death count is", d, ". Click 'ok' when ready to continue."))
+  dlgMessage(message2, type = "ok")
+  
+# The file names
+filesToPrint <- c(
+  paste0(Sys.Date(), "_Case and Death Rates.xlsx"), 
+  paste0(Sys.Date(), "_Zip_Rates.xlsx"),
+  paste0(Sys.Date()," Cases from other jurisdictions test.xlsx"), 
+  "case_status_superseded_check_summary.csv",
+  "Duplicate_Death_Cases.xlsx",
+  "Detroit City COVID Confirmed Cases and Rates by ZIP Code.csv",
+  "Addresses of Positive.csv",
+  "Addresses of Positive Past 21 days.csv",
+  paste0(Sys.Date(), "_Full_extract_combined.xlsx"),
+  paste0(Sys.Date(), "_Cleaned_Covid_Data.xlsx"),
+  "Operational metrics.xlsx",
+  "Public_COVID_Data.xlsx",
+  "Public Covid Mayor.xlsx",
+  "Public_COVID_Data_School.xlsx",
+  "Deaths by Date.csv",
+  "Death records missing information.xlsx",
+  "Occupations_list.txt")
+
+# The data to save
+dataToPrint <- list(
+  pop_table_all, zipPopTable, Flagged_cases, as_tibble(superseded2), dups, dataPortalRates, add, add_21days, covidData, clean, Operational_metrics, PublicCOVID, PublicCOVID_mayor, SchoolCOVID, 
+  deathsByDate, incompleteD, occupations)
+
+# Save all the files to the dated analysis folder
+for(i in 1:length(filesToPrint)){
+  f <- filesToPrint[i]
+  d <- dataToPrint[i]
+  cat("\nNow printing ", f)
+  if(grepl("csv", f)){
+    cat("...")
+    write.csv(d, file = paste0(outputLocation, "/", f), row.names = FALSE, sep = ",")}
+  if(grepl("xlsx", f)){
+    cat("...")
+      write.xlsx(d, paste0(outputLocation, "/", f))}
+  if(grepl("txt", f)){
+    cat("...")
+    write.table(d, paste0(outputLocation, "/", f), sep="\t", row.names = FALSE)}
+  cat("...")
+}
+```
+
+** Save certain files to their named folders if applicable, or to the main COVID folder **
+```{r saveToFolders ## Samantha Lynn Bell DHD 2021 ##}
+
+# Option for testing of printing to various files
+testing <- dlg_message(message="Will you be testing the print locations?", type = "yesno")$res
+if(testing=="yes"){
+  dlg_message(message = "Now printing test files, these WILL NOT overwrite the files used for reporting", type="ok")
+  # Rate file for demographics
+  write.xlsx(pop_table_all, paste0(location, "/DAILY -- Case and Death Rates/", Sys.Date(), "(test)_Case and Death Rates.xlsx"), overwrite = T)
+  write.xlsx(pop_table_all, paste0(location, internalReportFolder, "(test)Case and Death Rates.xlsx"), overwrite = T)
+  write.xlsx(pop_table_all, paste0(mayorDashBox, "/(test)Case and Death Rates.xlsx"), overwrite = T)
+  write.xlsx(pop_table_all, paste0(location, "/PUBLIC DASHBOARD FILES/", "(test)Case and Death Rates.xlsx"), overwrite = T)
+  
+  # Zip rate file
+  write.xlsx(mayorDashZips, paste0(mayorDashBox, "/(test)Zip_Rates.xlsx"), overwrite = T) 
+  write.xlsx(zipPopTable, paste0(location, internalReportFolder, "(test)Zip_Rates.xlsx"), overwrite = T)
+  
+  # Cases removed from analysis due to incorrect jurisdiction
+  write.xlsx(Flagged_cases, paste0(location, "/DAILY -- Removed cases from other jurisdictions/", Sys.Date()," (test)Cases from other jurisdictions test.xlsx"), overwrite = T)
+  
+  # Duplicate deaths
+  write.xlsx(dups, paste0(location, "/DAILY -- Duplicates from MDSS/", "(test)Duplicate_Death_Cases.xlsx"), overwrite = T) 
+  
+  # Death data
+  write.table(deathsByDate, paste0(location, "/(test)Deaths by Date.csv"), sep = ",", row.names=FALSE)
+  write.xlsx(deaths, file = paste0(location, "/(test)Deaths.xlsx"), sep="\t", row.names=FALSE, overwrite = T) 
+  
+  # The main full extract
+  write.xlsx(covidData, paste0(location, "/(test)Full_extract_combined.xlsx"), overwrite = T) 
+  write.xlsx(covidData, paste0(location, "/DAILY -- COVID Full Daily Extract Archives/", "(test)Full_extract_combined.xlsx"), overwrite = T) 
+  
+  # Cleaned full extract
+  write.xlsx(clean, paste0(location, "/(test)Cleaned_Covid_Data.xlsx"), overwrite = T) 
+  clean$PositiveCovidTestReportDates <- paste(clean$PositiveCovidTestReportDates) #flatten the list of tests to it can print CSV
+  write.table(clean, file = paste0(location, internalReportFolder, "(test)Cleaned_Covid_Data.csv"), sep=",", row.names=FALSE, fileEncoding = "UTF-8" ) #csv version for internal report
+  
+  #Mayor operational metrics
+  write.xlsx(Operational_metrics, paste0(mayorDashBox, "/(test)Operational metrics.xlsx")) # for the mayor dashboard
+  
+  # Public dashboard files
+  write.xlsx(PublicCOVID, paste0(location, "/(test)Public_COVID_Data.xlsx"), overwrite = T) 
+  write.xlsx(PublicCOVID, paste0(location, "/DAILY -- Public Covid Data/",Sys.Date(),"_(test)Public_COVID_Data.xlsx"), overwrite = T) 
+  write.xlsx(PublicCOVID, paste0(location, "/PUBLIC DASHBOARD FILES/", "_(test)Public_COVID_Data.xlsx"), overwrite = T) 
+  
+  # Mayor dashboard files
+  write.xlsx(PublicCOVID_mayor, paste0(mayorDashBox, "/(test)Public Covid Mayor.xlsx"), overwrite = T) 
+  write.xlsx(PublicCOVID_mayor, paste0(location, "/DAILY -- Public Covid Mayor/", Sys.Date(), "(test)Public Covid Mayor.xlsx"), overwrite = T) 
+  
+  # Occupations list
+  write.table(occupations, file=paste0(location, "/(test)Occupations_list.txt"), sep="|", row.names = FALSE)
+  
+  # High Risk Location analysis files
+  write.table(add_21days, file = paste0(location, "/DAILY -- High Risk Flags-Congregate Housing/" ,"(test)Addresses of Positive Past 21 days.csv"), sep=",", row.names=FALSE) 
+  write.table(add_21days, file = paste0(highriskbox ,"(test)Addresses of Positive Past 21 days.csv"), sep=",", row.names=FALSE)                  
+}else{
+  overwrite <- dlg_message(message="Are you ready to OVERWRITE files in other folders? This cannot be undone. ", type = "yesno")$res
+  if(overwrite=="yes"){
+# Rate file for demographics
+    write.xlsx(pop_table_all, paste0(location, "/DAILY -- Case and Death Rates/", Sys.Date(), "_Case and Death Rates.xlsx"), overwrite = T)
+    write.xlsx(pop_table_all, paste0(location, internalReportFolder, "Case and Death Rates.xlsx"), overwrite = T)
+    write.xlsx(pop_table_all, paste0(mayorDashBox, "/Case and Death Rates.xlsx"), overwrite = T)
+    write.xlsx(pop_table_all, paste0(location, "/PUBLIC DASHBOARD FILES/", "Case and Death Rates.xlsx"), overwrite = T)
+    
+    # Zip rate file
+    write.xlsx(mayorDashZips, paste0(mayorDashBox, "/Zip_Rates.xlsx"), overwrite = T) 
+    write.xlsx(zipPopTable, paste0(location, internalReportFolder, "Zip_Rates.xlsx"), overwrite = T)
+    
+    # Cases removed from analysis due to incorrect jurisdiction
+    write.xlsx(Flagged_cases, paste0(location, "/DAILY -- Removed cases from other jurisdictions/", Sys.Date()," Cases from other jurisdictions test.xlsx"), overwrite = T)
+    
+    # Duplicate deaths
+    write.xlsx(dups, paste0(location, "/DAILY -- Duplicates from MDSS/", "Duplicate_Death_Cases.xlsx"), overwrite = T) 
+    
+    # Death data
+    write.table(deathsByDate, paste0(location, "/Deaths by Date.csv"), sep = ",", row.names=FALSE)
+    write.xlsx(deaths, file = paste0(location, "/Deaths.xlsx"), sep="\t", row.names=FALSE, overwrite = T) 
+    
+    # The main full extract
+    write.xlsx(covidData, paste0(location, "/Full_extract_combined.xlsx"), overwrite = T) 
+    write.xlsx(covidData, paste0(location, "/DAILY -- COVID Full Daily Extract Archives/", Sys.Date(), "_Full_extract_combined.xlsx"), overwrite = T) 
+    
+    # Cleaned full extract
+    write.xlsx(clean, paste0(location, "/Cleaned_Covid_Data.xlsx"), overwrite = T) 
+    clean$PositiveCovidTestReportDates <- paste(clean$PositiveCovidTestReportDates) #flatten the list of tests to it can print CSV
+    write.table(clean, file = paste0(location, internalReportFolder, "Cleaned_Covid_Data.csv"), sep=",", row.names=FALSE, fileEncoding = "UTF-8" ) #csv version for internal report
+    
+    #Mayor operational metrics
+    write.xlsx(Operational_metrics, paste0(mayorDashBox, "/Operational metrics.xlsx"), overwrite = T) # for the mayor dashboard
+    
+    # Public dashboard files
+    write.xlsx(PublicCOVID, paste0(location, "/Public_COVID_Data.xlsx"), overwrite = T) 
+    write.xlsx(PublicCOVID, paste0(location, "/DAILY -- Public Covid Data/",Sys.Date(),"_Public_COVID_Data.xlsx"), overwrite = T) 
+    write.xlsx(PublicCOVID, paste0(location, "/PUBLIC DASHBOARD FILES/", "Public_COVID_Data.xlsx"), overwrite = T) 
+    
+    # Mayor dashboard files
+    write.xlsx(PublicCOVID_mayor, paste0(mayorDashBox, "/Public Covid Mayor.xlsx"), overwrite = T) 
+    write.xlsx(PublicCOVID_mayor, paste0(location, "/DAILY -- Public Covid Mayor/", Sys.Date(), "Public Covid Mayor.xlsx"), overwrite = T) 
+    
+    # Occupations list
+    write.table(occupations, file=paste0(location, "/Occupations_list.txt"), sep="|", row.names = FALSE)
+    write.table(occupations_short, file=paste0(location, "/Occupations_list_short.txt"), sep="|", row.names = FALSE)
+
+    
+    # High Risk Location analysis files
+    write.table(add_21days, file = paste0(location, "/DAILY -- High Risk Flags-Congregate Housing/" ,"Addresses of Positive Past 21 days.csv"), sep=",", row.names=FALSE) 
+    write.table(add_21days, file = paste0(highriskbox ,"Addresses of Positive Past 21 days.csv"), sep=",", row.names=FALSE) 
+  }
+}
+  
+  # The end
+  endTime <- Sys.time()
+  time <- capture.output(endTime - startTime)
+  operationalMetrics <- paste(paste(Sys.Date()), ",", time, ",", paste(Sys.info()[['login']])) #run time for user
+  write(operationalMetrics, paste0(location, "/", "Runtime by user.csv"), append = TRUE)
+  c <- dim(covidData)[1]
+  d <- dim(covidData%>%filter(Deceased=="Deceased"))[1]
+  message <- capture.output(cat("Congratulations, your analysis is complete!\n", time))
+  message <- gsub("Time difference of", "You spent a total time of", message) #change some default text from the timer
+  dlgMessage(message, type = "ok")
+  message2 <- capture.output(cat("The total case count is", c, " and the total death count is", d, "."))
+  dlgMessage(message2, type = "ok")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## OLD ANALYSIS SECTIONS - DISCONTINUED ##
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+```{r}
+stop()
+```
+
+
+#-------------------------------------------------------------------------
+Age Adjusted Rates by Zip Code
+
+This section makes age adjusted rates for all cases and all deaths, but does so within each zip code
+-The population count for each age range: counts from 
+-The weights used are the USA Standard 2000 population percentage
+-A rate is calculated for each age range within a zip code, then adjusted for the weight using USA Standard 2000 population percentage. Finally, all age range adjusted rates are added together to get the total rate within that zip code. 
+____________________________________________________________________________________________________________
+
+To calculate the age-adjusted CASE rate, the case rate of each age range was first weighted by multiplying it by the USA Standard 2000 population percentage for this age range
+The overall age adjusted rate is found by summing these adjusted rates
+
+For n of all unique Age Ranges from Age_Range variable
+â Rate[n] = {((C[1]/P[1])*100k)*W[1]} + {((C[2]/P[2])*100k)*W[2]} + ... 
+where:
+  C = # cases for said demographic within one zip code
+  P = census count for said demographic within one zip code
+  W = the weight (percentage in decimal format) of said demographic in the USA Standard 2000 population percentage
+____________________________________________________________________________________________________________
+To calculate the age-adjusted DEATH rate, the case rate of each age range was first weighted by multiplying it by the USA Standard 2000 population percentage for this age range
+The overall age adjusted rate is found by summing these adjusted rates
+
+For n of all unique Age Ranges from Age_Range variable
+â Rate[n] = {((D[1]/P[1])*100k)*W[1]} + {((D[2]/P[2])*100k)*W[2]} + ... 
+where:
+  D = # cases for said demographic within one zip code
+  P = census count for said demographic within one zip code
+  W = the weight (percentage in decimal format) of said demographic in the USA Standard 2000 population percentage
+  
+____________________________________________________________________________________________________________
+  
+Or, to simplify:
+Age-Adjusted Rate = Sum of(Age-specific Rate * Population Weight)
+
+```{r zip_age_rates ## Samantha Lynn Bell DHD 2020 ##}
+#---------------------------------------------------------
+# The zip code populations for Detroit Zip Codes. These numbers are NOT clipped to Detroit residents only, but represent the entirety of the zip code. The numbers were obtained through NHGIS and come from 2010 Census: SF 1a - P & H Tables [Blocks & Larger Areas], NHGIS code: 2010_SF1a, NHGIS ID:  ds172
+zip_total <- c(12814, 16603, 28409, 27997, 44045, 21954, 20252, 10234, 32262, 31017, 7082, 39038, 27712, 22759, 13565, 5645, 8210, 46931,
+               38727, 25336, 44439, 5302, 45380, 52130, 36140, 45063, 30607, 31743, 35524, 17722)
+zip_under_10 <- c(1031, 1565, 3573, 3694, 7178, 2815, 2095, 1334, 6763, 6429, 1153, 6634, 3887, 2471, 1791, 771, 1029, 5962, 4338, 3673,
+                  6948, 144, 6029, 8397, 5028, 5367, 3570, 4209, 4591, 2239)
+zip_10_19 <- c(1297, 2633, 4571, 4315, 9334, 3392, 2107, 1396, 5286, 5462, 1125, 6265, 4768, 3015, 2241, 713, 1214, 7640, 6428, 4315,
+               8773, 235, 7874, 9621, 6462, 6966, 4453, 5102, 5191, 2433)
+zip_20_29 <- c(3018, 3083, 3500, 3532, 6304, 2815, 2859, 1655, 5242, 4839, 1105, 6263, 3749, 2593, 1704, 938, 982, 5936, 4399, 3425, 
+              5879, 1258, 5842, 7178, 4919, 5112, 2248, 4043, 3945, 2253)
+zip_30_39 <- c(1569, 1904, 3222, 3314, 5647, 2507, 2341, 1237, 4954, 4613, 886, 5488, 3292, 2277, 1464, 801, 948, 6006, 4252, 3101, 
+              5755, 900, 5725, 6804, 4366, 5412, 2857, 3700, 5261, 2786)
+zip_40_49 <- c(1472, 2027, 3929, 3710, 5825, 3032, 2456, 1479, 3919, 3532, 914, 4938, 3469, 2927, 1751, 791, 1041, 6142, 4994, 3503, 
+              6185, 750, 5940, 6814, 4620, 5726, 4547, 4185, 5669, 2652)
+zip_50_59 <- c(2094, 2514, 4322, 3862, 5514, 3092, 3376, 1590, 3100, 3039, 899, 4575, 3720, 3926, 2052, 798, 1246, 6870, 5200, 3733, 
+              5998, 925, 5883, 6312, 4812, 6239, 5226, 4334, 5124, 2460)
+zip_60_69 <- c(1349, 1571, 2696, 2385, 2693, 1857, 2512, 765, 1659, 1557, 483, 2541, 2428, 2593, 1418, 441, 688, 5042, 4079, 2334, 
+              2959, 726, 4810, 3935, 3112, 5124, 3674, 2691, 2775, 1261)
+zip_70_79 <- c(581, 690, 1593, 1797, 960, 1200, 1491, 429, 863, 887, 296, 1290, 1374, 1554, 707, 225, 515, 2028, 2981, 866, 1083, 
+              235, 2219, 1759, 1626, 3142, 2119, 1978, 1412, 758)
+zip_over_80 <- c(403, 616, 1003, 1388, 590, 1244, 1015, 349, 476, 659, 221, 1044, 1025, 1403, 437, 167, 547, 1305, 2056, 386, 859, 
+                129, 1058, 1310, 1195, 1975, 1913, 1501, 1556, 880)
+zipRateTable <- cbind(zipRateTable, zip_total, zip_under_10, zip_10_19, zip_20_29, zip_30_39, zip_40_49, zip_50_59, zip_60_69, zip_70_79, zip_over_80) # add the new counts to the rate table
+
+
+# Start with empty variables
+Age_adjusted_case_rate_ZIP <- ""
+Age_adjusted_death_rate_ZIP <- ""
+zips <- ""
+
+for(zipcode in Zip_Code_2010){ # For each zip code, run and find rates
+  i <- which(Zip_Code_2010 %in% zipcode)
+  zips[i] <- zipcode
+
+  zip_pop_under10 <- as.numeric(zip_under_10[i])
+  zip_pop_ten <- as.numeric(zip_10_19[i])
+  zip_pop_twenty <- as.numeric(zip_20_29[i])
+  zip_pop_thirty <- as.numeric(zip_30_39[i])
+  zip_pop_fourty <- as.numeric(zip_40_49[i])
+  zip_pop_fifty <- as.numeric(zip_50_59[i])
+  zip_pop_sixty <- as.numeric(zip_60_69[i])
+  zip_pop_seventy <- as.numeric(zip_70_79[i])
+  zip_pop_eighty <- as.numeric(zip_over_80[i])
+  
+  
+# filter for valid addresses 
+goodAdresses <- covidData  %>% filter(!is.na(Patient_Address_Only)) 
+  # Find the number of positive cases within each age range
+  under10 <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_In_Years<10)))
+  ten <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="10_19")))
+  twenty <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="20-29")))
+  thirty <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="30-39")))
+  fourty <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="40-49")))
+  fifty <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="50-59")))
+  sixty <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="60-69")))
+  seventy <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="70-79")))
+  eighty <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range==">= 80")))
+  
+  # Find the number of deceased in each age range
+  under10D <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_In_Years<10&goodAdresses$Deceased=="Deceased")))
+  tenD <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="10_19"&goodAdresses$Deceased=="Deceased")))
+  twentyD <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="20-29"&goodAdresses$Deceased=="Deceased")))
+  thirtyD <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="30-39"&goodAdresses$Deceased=="Deceased")))
+  fourtyD <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="40-49"&goodAdresses$Deceased=="Deceased")))
+  fiftyD <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="50-59"&goodAdresses$Deceased=="Deceased")))
+  sixtyD <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="60-69"&goodAdresses$Deceased=="Deceased")))
+  seventyD <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range=="70-79"&goodAdresses$Deceased=="Deceased")))
+  eightyD <- as.numeric(length(which(goodAdresses$Simple_Investigation_Zip==zipcode&goodAdresses$Case_Status=="Confirmed"&goodAdresses$Age_Range==">= 80"&goodAdresses$Deceased=="Deceased")))
+  
+  # Adjust the case rates in each age range by multiplying by their census population percentages
+  # Adjust the case rates in each age range by multiplying by their census population percentages
+  adj_rate_under10 <- ((under10/zip_pop_under10)*100000)*standard_population_weight_under10
+  adj_rate_10_19 <- ((ten/zip_pop_ten)*100000)*standard_population_weight_10_19
+  adj_rate_20_29 <- ((twenty/zip_pop_twenty)*100000)*standard_population_weight_20_29
+  adj_rate_30_39 <- ((thirty/zip_pop_thirty)*100000)*standard_population_weight_30_39
+  adj_rate_40_49 <- ((fourty/zip_pop_fourty)*100000)*standard_population_weight_40_49
+  adj_rate_50_59 <- ((fifty/zip_pop_fifty)*100000)*standard_population_weight_50_59
+  adj_rate_60_69 <- ((sixty/zip_pop_sixty)*100000)*standard_population_weight_60_69
+  adj_rate_70_79 <- ((seventy/zip_pop_seventy)*100000)*standard_population_weight_70_79
+  adj_rate_80plus <- ((eighty/zip_pop_eighty)*100000)*standard_population_weight_80_plus
+  
+  # Age adjusted rate for all cases together:
+  Age_adjusted_case_rate_ZIP[i] <- sum(adj_rate_under10, adj_rate_10_19, adj_rate_20_29, adj_rate_30_39, adj_rate_40_49, adj_rate_50_59, adj_rate_60_69, adj_rate_70_79, adj_rate_80plus)
+
+  # Adjust the death rates in each age range by multiplying by their population percentages
+  adj_death_rate_under10 <- ((under10D/zip_pop_under10)*100000)*standard_population_weight_under10
+  adj_death_rate_10_19 <- ((tenD/zip_pop_ten)*100000)*standard_population_weight_10_19
+  adj_death_rate_20_29 <- ((twentyD/zip_pop_twenty)*100000)*standard_population_weight_20_29
+  adj_death_rate_30_39 <- ((thirtyD/zip_pop_thirty)*100000)*standard_population_weight_30_39
+  adj_death_rate_40_49 <- ((fourtyD/zip_pop_fourty)*100000)*standard_population_weight_40_49
+  adj_death_rate_50_59 <- ((fiftyD/zip_pop_fifty)*100000)*standard_population_weight_50_59
+  adj_death_rate_60_69 <- ((sixtyD/zip_pop_sixty)*100000)*standard_population_weight_60_69
+  adj_death_rate_70_79 <- ((seventyD/zip_pop_seventy)*100000)*standard_population_weight_70_79
+  adj_death_rate_80plus <- ((eightyD/zip_pop_eighty)*100000)*standard_population_weight_80_plus
+  
+  Age_adjusted_death_rate_ZIP[i] <- sum(adj_death_rate_under10, adj_death_rate_10_19, adj_death_rate_20_29, adj_death_rate_30_39, adj_death_rate_40_49, adj_death_rate_50_59, adj_death_rate_60_69, adj_death_rate_70_79, adj_death_rate_80plus)
+
+}
+# Make a table and bind to full data by zip code 
+zipRateTable2 <- as_tibble(cbind(zips, Age_adjusted_case_rate_ZIP, Age_adjusted_death_rate_ZIP))
+zipRateTable3 <- left_join(zipRateTable2, zipRateTable, by = c("zips" = "Zip_Code_2010"))
+covidData <- left_join(covidData, zipRateTable3, by = c("Simple_Investigation_Zip" = "zips"))
+
+# Hide counts under 16 and their respective rates
+zipRateTable3$Age_adjusted_case_rate_ZIP[as.numeric(zipRateTable3$Zip_case_count_All)<16] <- "Suppressed"
+zipRateTable3$Age_adjusted_death_rate_ZIP[as.numeric(zipRateTable3$Zip_death_count_All)<16] <- "Suppressed"
+```
+
+
+Transform coordinates from MDSS
+```{r transformCoords ## Samantha Bell 2020 ##}
+#---------------------------------------------------------
+## Get ready to transform the coordinates from MDSS to usable in Tableau! ##
+ add_coords <- add[!is.na(add$Investigation_Addr_Geo_X)&!is.na(add$Investigation_Addr_Geo_Y),]
+ x <- add_coords$Investigation_Addr_Geo_X
+ y <- add_coords$Investigation_Addr_Geo_Y
+
+# Define the coordinate systems.
+ d <- data.frame(lon=as.numeric(x), lat=as.numeric(y), add_coords$InvestigationID)
+ coordinates(d) <- c("lon", "lat")
+ proj4string(d) <- CRS("+init=epsg:3078") 
+ CRS.new <- CRS("+init=epsg:4326")
+ transformed <- spTransform(d, CRS.new)
+ 
+# Plot the results to make sure it looks ok.
+ par(mfrow=c(1,3))
+ plot.default(x,y, main="Raw data", cex.axis=.95)
+ plot(d, axes=TRUE, main="Original lat-lon", cex.axis=.95)
+ plot(transformed, axes=TRUE, main="Projected", cex.axis=.95)
+
+# table the new coordinates
+ newCoordinates <- data.frame(coordinates(transformed)[,1], coordinates(transformed)[,2], transformed[1]$add_coords.InvestigationID)
+ colnames(newCoordinates) <- c("Transformed_Longitude", "Transformed_Lattitude", "InvestigationID")
+# Make numeric
+ newCoordinates$InvestigationID <- as.numeric(newCoordinates$InvestigationID)
+ newCoordinates$Transformed_Lattitude <- as.numeric(newCoordinates$Transformed_Lattitude)
+ newCoordinates$Transformed_Longitude <- as.numeric(newCoordinates$Transformed_Longitude)
+# Join back to full data and add
+ covidData$InvestigationID <- as.numeric(covidData$InvestigationID)
+ covidData<- left_join(covidData, newCoordinates, by = "InvestigationID")
+ add$InvestigationID <- as.numeric(add$InvestigationID)
+ add <- left_join(add, newCoordinates, by = "InvestigationID")
+```
+
