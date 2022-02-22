@@ -1,0 +1,537 @@
+This code takes in HL7 reports either as a single or multiple, and:
+1) scrapes text
+2) separates sections of the report
+3) summarizes error types and error descriptions
+4) cleans up the categories and text descriptions
+5) plots the counts of specific errors
+6) creates summary tables
+7) creates patient line item spreadsheets by error
+8) looks for successful transmissions by date and patient
+
+The report dates are captured for each error
+
+```{r}
+library(pdftools)
+library(svDialogs)
+library(stringr)
+library(tidyverse)
+library(ggplot2)
+library(openxlsx)
+library(anytime)
+library(lubridate)
+```
+
+Options for loading entire year or daily HL7 reports
+```{r}
+loadHow <- dlg_input("What type of PDF do you have? Enter \n1 for a single PDF \n2 for multiple daily PDFs (one date per PDF)")$res
+
+if(loadHow=="1"){# Load the master PDF from the HL7 reports
+  ## EACH PAGE IS ONE ELEMENT ONCE LOADED
+  dlg_message("Please select your HL7 file", type ="ok")
+  as_text <- pdftools::pdf_text(dlg_open()$res) # text only
+  
+  # See what it looks like
+  as_text[1]
+  as_text[35]
+}
+if(loadHow=="2"){
+  dlg_message("Please select the folder containing your HL7 files", type ="ok")
+  # Where is the main folder located?
+  location <- dlgDir()$res
+  # Find the file paths that match your pattern
+  subfolders <- dlg_message("Would you like to include subfolders?", type="yesno")$res
+  if(subfolders=="yes"){subfolders<-TRUE}else(subfolders<-FALSE)
+  my_paths <- list.files(location, pattern = "HL7 Report", recursive = TRUE, include.dirs = paste0(subfolders))
+  # Load the files
+  loaded <-  lapply(paste0(location, "/", my_paths), function(x)pdftools::pdf_text(x))
+  # Combine all the data by starting with the first PDF and appending all others
+  as_text <- loaded[[1]]
+  for(i in loaded[2:length(loaded)]){
+    as_text <- append(as_text, i)
+  }
+}
+```
+
+Subset the PDF pages by type
+```{r}
+# Find each page by the title, use these page title locations to subset the data
+Summary <- as_text[grep("HL7 Transfer Report", as_text)]
+Errors <- as_text[grep("Errors from Transferred Data", as_text)]
+Users <- as_text[grep("User Errors", as_text)]
+Vim <- as_text[grep("Transferred Vim Transactions", as_text)]
+```
+
+    
+    ----WORK WITH THE TRANSFER ERRORS----
+
+Pull the headers with total and type of error
+```{r}
+# Set up an empty table to capture all error categories
+error_counts <- tibble("Error" = "NA")
+
+# Find every type of error in the PDF, along with the total count for that type
+for(i in 1:length(Errors)){
+  found <- str_extract_all(Errors[i], "Error Count\\\n\\D+\\d+", simplify = TRUE) # extract string starting with Error Count and ending with the count
+  for(j in found){ # save each type and count on each page (page may have more than one type of error listed)
+    error_counts <- rbind(error_counts, j)
+  }
+}
+
+# Remove the empty rows (from setup of table)
+error_counts <- error_counts[2:dim(error_counts)[1],]
+
+# Remove extra text by writing and applying a function to substitute text
+f <- function(x){gsub("Error Count\n", "", x)}
+error_counts <- sapply(error_counts[,1], f)
+
+# Split the type and the count
+error_summary <- as_tibble(str_split(error_counts,  "\\W{2,}", simplify = TRUE))
+colnames(error_summary) <- c("Error_Type", "Total Count")
+
+# Summarize - combining any repeat types from multiple PDFs
+error_summary <- error_summary %>% group_by(Error_Type) %>% summarise("Total Count" = sum(as.numeric(`Total Count`)))
+```
+
+Start a patient error record table
+```{r}
+# Get each occurrance of the error category in one column
+records <- "NA"
+for(i in error_summary$Error_Type){
+  repeats <- rep(i, as.numeric(error_summary$`Total Count`[error_summary$Error_Type==i]))
+  for(j in repeats){
+    records <- rbind(records, j)
+  }
+}
+# clean up the table
+records <- tibble("Error_Category" = records)
+records <- records[-1,]
+# make empty fields ready
+records$Record_Date_Start <- ""
+records$Record_Date_End <- ""
+records$Patient <- ""
+records$Error_Desc <- ""
+```
+
+Parse the patient info and errors by description
+Add to the records table
+```{r}
+# Find locations of patient name and DOB strings
+## The DOB and name occur between newlines, with DOB in middle, but newline character is not reliable on right side
+## Name format is not reliable, so use .+ for left side
+## Use newline to find beginning, then use DOB format to find end
+DOB_where <- str_locate_all(Errors, "\\n.+(DOB:)\\s+\\d+\\/\\d+\\/\\d+")
+
+# Make sure all DOB are found
+a <- 0
+for(i in DOB_where){a <- a+(dim(i)[1])}
+if(a!=sum(as.numeric(error_summary$`Total Count`))){stop("Hmm...you seem to have missed some records. Please check your DOB regex compared to the PDF. \n(More or fewer records found than are in the summary table)")}
+
+# Pull patient info and error description for each error
+n <- 1 # line in the final table
+for(i in 1:length(Errors)){
+  # Grab the date for this report
+    # nested pull the right date, remove surrounding text, separate date range
+  page_date_start <- gsub("\\s|(.*-)", "", 
+                          gsub("(\\n)|(Data submission date range:)|(Interface)", "", str_extract(Errors[i], "\\nData submission date range:.*\\nInterface")))
+  page_date_end <- gsub("\\s|(-.*)", "", 
+                        gsub("(\\n)|(Data submission date range:)|(Interface)", "", str_extract(Errors[i], "\\nData submission date range:.*\\nInterface")))
+  # if the user loaded more than one PDF ("daily" option) check that the date range is one day only
+    ## If not, stop the code and ask for review. 
+  if(loadHow=="2" & (difftime(anydate(page_date_end), anydate(page_date_end), units = "days")>1)){
+  stop(paste("Page", i, "of your Errors data is a PDF page that does not follow the 'daily' format. Make sure each 'daily' PDF represents a 24 hour period - correct before continuing."))}
+  if(length(DOB_where[[i]]==0)){} # If there are no errors on this page, skip it
+  if(length(DOB_where[[i]]>0)){
+    for(j in 1:dim(DOB_where[[i]])[1]){
+    # Use the locations found with str_locate above
+    start <- DOB_where[[i]][j,1]
+    end <- DOB_where[[i]][j,2]
+    x <- substr(Errors[i], start, end) # Pull the patient info
+    # Find the description of error for this patient (after DOB)
+    xx <- substr(Errors[i], end+1, end+100)
+    # Add to the table
+    records$Patient[n] <- x 
+    records$Error_Desc[n] <- xx
+    records$Record_Date_Start[n] <- page_date_start
+    records$Record_Date_End[n] <- page_date_end
+    # Count up for next row in table
+    n <- n+1
+    }
+  }
+}
+
+# review if any descriptions need to be added to the regex
+t <- table(records$Error_Desc)
+view(t)
+dlg_message("Please review the error descriptions. If there are any not represented in the regex for the next block mutate step, add before continuing", type ="ok")
+```
+
+Clean up the table
+```{r}
+if(dim(records)[1]==0){stop("You have no Transfer Errors, skipping.")} # Skip if empty
+
+# Separate Name and DOB
+records$DOB <- str_extract(records$Patient, "\\d+\\/\\d+\\/\\d+")
+records$Patient <- str_extract(records$Patient, "\\w+,\\W+\\w+")
+
+# Clean up certain Error Types that do not have descriptions
+records$Error_Desc[grepl("(More Than One)|(Person Is Deceased)", records$Error_Category, ignore.case = TRUE)] <- "NA"
+
+# Standardize the error description
+  ## IF absent, will save category
+records <- records %>% mutate(
+  Error_Desc = case_when(
+    grepl("Vaccine reported in inventory for lot number", Error_Desc, ignore.case = TRUE) ~ "Wrong lot number", 
+    grepl("No record to delete", Error_Desc, ignore.case = TRUE) ~ "No record to delete", 
+    grepl("Unable to delete dose.+More than one", Error_Desc, ignore.case = TRUE) ~ "Can't delete duplicate shot with conflicting lot",
+    grepl("waiver record already e", Error_Desc, ignore.case = TRUE) ~ "Waiver record already exists for series",
+    grepl("Shot Date cannot be less than birth", Error_Desc, ignore.case = TRUE) ~ "Shot date prior to DOB",
+    grepl("Manufacturer \\w{3} not found for vaccine", Error_Desc, ignore.case = TRUE) ~ "Invalid vaccine and manufacturer match",
+    grepl("Failed VIM Transactions", Error_Desc, ignore.case = TRUE) ~ "Vaccine inventory not deducted",
+    grepl("This site already has p", Error_Desc, ignore.case = TRUE) ~ "Conflicting info in existing record",
+    grepl("Child not found", Error_Desc, ignore.case = TRUE) ~ "Cannot delete - not in MCIR",
+    grepl("area code", Error_Desc, ignore.case = TRUE) ~ "Incorrect area code",
+    grepl("Responsible part \\w+ must be", Error_Desc, ignore.case = TRUE) ~ "Issue with responsible party info",
+    grepl("numeric or value error: character", Error_Desc, ignore.case = TRUE) ~ "Incorrect ZIP code format",
+    grepl("p_process_patient Error", Error_Desc, ignore.case = TRUE) ~ "Vaccine did not process",
+    grepl("Vaccine \\d+ .* is not in tab", Error_Desc, ignore.case = TRUE) ~ "Invalid vaccine code",
+    grepl("Lot not found", Error_Desc, ignore.case = TRUE) ~ "Vaccine lot not in inventory",
+    grepl("site already has this pat", Error_Desc, ignore.case = TRUE) ~ "Patient id already exists", 
+    grepl("exact fetch returns more than requested", Error_Desc, ignore.case = TRUE) ~ "Fetch row error", 
+    grepl("error returned from p_post_child_race", Error_Desc, ignore.case = TRUE) ~ "Cannot update race", 
+    grepl("Residence state code \\w{2,3} not in table", Error_Desc, ignore.case = TRUE) ~ "State code not found",
+    grepl("returned from p_update_resp_party", Error_Desc, ignore.case = TRUE) ~ "Cannot update resp_party",
+    grepl("Birth Date Cannot be more than child's shot", Error_Desc, ignore.case = TRUE) ~ "Child DOB after shot date", 
+    grepl("UTILITIES.F_CHECK_PRIV:", Error_Desc, ignore.case = TRUE) ~ "Utilities Check", 
+    TRUE ~ Error_Category
+  )
+)
+table(records$Error_Desc)
+```
+
+
+Summarize and print the transfer errors
+```{r}
+if(dim(records)[1]==0){stop("You have no Transfer Errors, skipping.")} # Skip if empty
+
+summary_with_desc <- records %>% group_by(Error_Category, Error_Desc) %>% summarise(n = n())
+
+desc_plot <- ggplot(records) +
+  aes(x = Error_Desc, fill = Error_Desc) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "HL7 Transfer Errors",
+    x = "",
+    y = "Number of errors",
+    fill = "Error description"
+  ) +
+  theme_bw() + 
+  geom_text(data=summary_with_desc,aes(x=Error_Desc,y=n,label=n),vjust=0.5, hjust=-0.25) +
+  coord_flip() +
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  expand_limits(y=2500)
+
+desc_plot
+
+dlg_message("Select the folder to save your output")
+DIR <- dlg_dir()$res
+write.xlsx(summary_with_desc, paste0(DIR, "/Summary of transfer error descriptions.xlsx"), overwrite = TRUE)
+write.xlsx(records, paste0(DIR, "/Records with tranfer errors.xlsx"), overwrite = TRUE)
+
+```
+
+
+    ----WORK WITH THE USER ERRORS----
+    
+Strip the header
+```{r}
+# set up the match object using a pattern and the text
+pat <- regexpr("\\s+User Errors Report\\n.+\\n.*{5}\\d+\\/\\d+\\/\\d+\\n", Users) 
+# Apply the pattern object and find all matches (One for each page)
+user_header <- regmatches(Users, pat)
+
+# Strip the headers from the pages, and replace with 2 newline characters to match the formatting at the beginning of all other records in this page
+## (every patient record starts with \n\n except the first one, and we stripped one with the header - this will fix that)
+Users <- gsub("\\s+User Errors Report\\n.+\\n.*{5}\\d+\\/\\d+\\/\\d+\\n", "\n\n", Users)
+```
+
+
+```{r}
+# Find locations of patient name patient id, and DOB strings
+## The names occur after two newlines, and are the first item in each record. They end with whitespace and then the title "Original Value"
+## Name format is not reliable, so allow for whitespace and other characters, and don't rely on double newline
+## DOB occurs after the title "Status" and a newline, then "DOB:" precedes. 
+## Patient id follows DOB and always has "PATIENT ID:" preceding
+DOB_where <- str_locate_all(Users, "(DOB:)\\s+(\\d+\\/\\d+\\/\\d+)")
+Name_where <- str_locate_all(Users, "\\n.+,.+Original")
+Id_where <- str_locate_all(Users, "PATIENT ID:.*\\n")
+
+# Make sure all the records are found (each record should have name, DOB, and id)
+a <- 0
+b <- 0
+c <- 0
+for(i in DOB_where){a <- a+(dim(i)[1])}
+for(i in Name_where){b <- b+(dim(i)[1])}
+for(i in Id_where){c <- c+(dim(i)[1])}
+# Make sure all three lengths are the same - same number of records found 3 ways
+if(!((a==b)&(b==c))){stop("Hmm...you seem to have missed some records. Please check your DOB regex compared to the PDF. \n(More or fewer records found than are in the summary table)")}
+```
+
+
+Parse the patient info and errors by description
+```{r}
+# Set up a table to hold the errors and records
+user_error_records <- tibble(
+  "Record_Date_Start" = rep("NA", a), 
+  "Record_Date_End" = rep("NA", a),
+  "Name" = rep("NA", a),
+  "DOB" = rep("NA", a), 
+  "Patient Id" = rep("NA", a),
+  "Error" = rep("NA", a))
+
+# Pull patient info and error description for each error
+n <- 1
+nn <- 1
+nnn <- 1
+for(i in 1:length(Users)){ # for each page of user errors
+    page_date_start <- gsub("\\s|(.*-)", "", 
+                            gsub("(\\n)|(Data submission date range:)|(Interface)", "", str_extract(Errors[i], "\\nData submission date range:.*\\nInterface")))
+    page_date_end <- gsub("\\s|(-.*)", "", 
+                          gsub("(\\n)|(Data submission date range:)|(Interface)", "", str_extract(Errors[i], "\\nData submission date range:.*\\nInterface")))  
+  if(length(DOB_where[[i]]==0)){} # If there are no errors on this page, skip it
+  if(length(DOB_where[[i]]>0)){
+    for(j in 1:dim(DOB_where[[i]])[1]){ # for each dob in that page
+      # pull start and end index for this item
+      DOB_start <- DOB_where[[i]][j,1]
+      DOB_end <- DOB_where[[i]][j,2]
+      # use the indices to grab the string
+      D <- substr(Users[i], DOB_start, DOB_end)
+      # apply the string to the records table
+      user_error_records$DOB[n] <- D
+      n <- n+1 # iterate up for next loop & next row in final table
+      } 
+    for(k in 1:dim(Name_where[[i]])[1]){ # for each name in that page (same logic as for DOB)
+      Name_start <- Name_where[[i]][k,1]
+      Name_end <- Name_where[[i]][k,2]
+      Nm <- substr(Users[i], Name_start, Name_end)
+      user_error_records$Name[nn] <- Nm
+      nn <- nn+1 # iterate up for next loop & next row in final table
+    }
+    for(m in 1:dim(Id_where[[i]])[1]){
+      Id_start <- Id_where[[i]][m,1]
+      Id_end <- Id_where[[i]][m,2]
+      I <- substr(Users[i], Id_start, Id_end)
+      user_error_records$`Patient Id`[nnn] <- I
+      # Pull the error message from after the patient id
+      E <- str_extract(substr(Users[i], Id_end, Id_end+300), "\\n.*\\n")
+      user_error_records$Error[nnn] <- E
+      # get the dates for this record page
+      user_error_records$Record_Date_Start[nnn] <- page_date_start
+      user_error_records$Record_Date_End[nnn] <- page_date_end
+      nnn <- nnn+1 # iterate up for next loop & next row in final table
+    }
+  }
+}
+```
+    
+Clean up the user error table
+```{r}
+if(dim(user_error_records)[1]==0){stop("You have no User Errors, skipping.")} # Skip if empty
+
+# Get rid of extra info in the fields
+user_error_records$Name <- gsub("(\\n)|(\\s+Original)", "", user_error_records$Name)
+user_error_records$DOB <- gsub("\\s|(DOB:)", "", user_error_records$DOB)
+user_error_records$`Patient Id` <- gsub("(PATIENT ID:)|\\n", "", user_error_records$`Patient Id`)
+
+# Clean up the error descriptions - make into two fields
+split_error <- str_split(user_error_records$Error, "\\s{5,}.*\\s{5,}", simplify = TRUE) # split on the garbage in the middle of the string
+colnames(split_error) <- c("Error_Type", "Error_Description")
+# Remove newlines
+split_error <- gsub("\\n", "", split_error)
+# Bind clean fields to final data and remove dirty error field
+user_error_records <- cbind(user_error_records, split_error) 
+user_error_records <- user_error_records %>% select(-Error)
+```
+
+Clean up the error descriptions
+```{r}
+if(dim(user_error_records)[1]==0){stop("You have no User Errors, skipping.")} # Skip if empty
+user_error_records <- user_error_records%>% mutate(
+  Error_Description = case_when(
+    grepl("phone area code.*must be 3 numeric", Error_Description, ignore.case = TRUE) ~ "Area code not 3 digits", 
+    grepl("Gender : code", Error_Description, ignore.case = TRUE) ~ "Bad gender code", 
+    grepl("(should be all letters)|(should be valid alphabet)", Error_Description, ignore.case = TRUE) ~ "Should be all letters", 
+    grepl("Manufacturer : code", Error_Description, ignore.case = TRUE) ~ "Bad manufacturer code", 
+    grepl("The Date cannot be greater than today", Error_Description, ignore.case = TRUE) ~ "Date is the in future", 
+    grepl("phone number.*must be 7", Error_Description, ignore.case = TRUE) ~ "Phone number not 7 digits", 
+    grepl("State : code", Error_Description, ignore.case = TRUE) ~ "Bad state code", 
+    grepl("must be present to add a child", Error_Description, ignore.case = TRUE) ~ "Missing info can't add child", 
+    grepl("Shot Date cannot be less than birth", Error_Description, ignore.case = TRUE) ~ "Shot date prior to DOB", 
+    grepl("Vaccine_Num : code", Error_Description, ignore.case = TRUE) ~ "Bad Vaccine_Num code", 
+    grepl("PRF not found for vaccine code", Error_Description, ignore.case = TRUE) ~ "Bad vaccine code", 
+    grepl("Phone Area code can not be", Error_Description, ignore.case = TRUE) ~ "Missing area code", 
+    TRUE & !is.na(Error_Description) & Error_Description!="NA" ~ Error_Description,
+    TRUE ~ Error_Type
+  )
+)
+t <- table(user_error_records$Error_Description)
+view(t)
+```
+
+Summarize and print the user errors
+```{r}
+if(dim(user_error_records)[1]==0){stop("You have no User Errors, skipping.")} # Skip if empty
+# Summarize the errors
+summary_with_desc2 <- user_error_records %>% group_by(Error_Type, Error_Description) %>% summarise(n = n())
+
+# plot
+desc_plot2 <- ggplot(user_error_records) +
+  aes(x = paste(Error_Type, "-", Error_Description), fill = paste(Error_Type, "-", Error_Description)) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "HL7 User Errors",
+    x = "",
+    y = "Number of errors",
+    fill = "Error type"
+  ) +
+  theme_bw() + 
+  geom_text(data=summary_with_desc2,aes(x=paste(Error_Type, "-", Error_Description),y=n,label=n),vjust=0.5, hjust=-0.1) +
+  coord_flip() +
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  expand_limits(y=10000)
+
+desc_plot2
+
+# print files
+write.xlsx(summary_with_desc2, paste0(DIR, "/Summary of user error descriptions.xlsx"), overwrite = TRUE)
+write.xlsx(user_error_records, paste0(DIR, "/Records with user errors.xlsx"), overwrite = TRUE)
+```
+# Plot the errors over time
+```{r}
+user_error_records <- user_error_records %>% 
+  mutate(
+    Error_Week = paste0(month(anydate(Record_Date_Start)), "-", year(anydate(Record_Date_Start))),
+    Record_Date_Start = anydate(Record_Date_Start))  
+
+# plot
+error_week_plot1 <- ggplot(user_error_records %>% filter(Error_Week!="NA-NA")) +
+  aes(x = Error_Week, fill = Error_Type) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "User Errors Over Time",
+    x = "Week of record submission",
+    y = "Number of errors",
+    fill = "Submission_Week"
+  ) +
+  coord_flip() 
+
+error_week_plot1
+
+records <- records %>% 
+  mutate(
+    Error_Week = paste0(month(anydate(Record_Date_Start)), "-", year(anydate(Record_Date_Start))),
+    Record_Date_Start = anydate(Record_Date_Start))  
+
+# plot
+error_week_plot2 <- ggplot(records %>% filter(Error_Week!="NA-NA")) +
+  aes(x = Error_Week, fill = Error_Desc) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Errors Over Time",
+    x = "Week of record submission",
+    y = "Number of errors",
+    fill = "Submission_Week"
+  ) +
+  coord_flip() +
+  scale_y_log10() +
+  expand_limits(y=10000)
+
+error_week_plot2
+
+```
+
+
+    ----- Work with Vim Transactions -----
+    
+Pull the Vim records and date
+```{r}
+# Set up regex patterns
+pat <- "\\n.*,.*-.*\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}.*\\n.*\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}" # pull text with the date
+pat2 <- "\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}" # Will match any date
+pat3 <- "\\w+\\s*,\\s*\\w+" # Will match name
+
+# pull all record dates from Vim section of PDF
+vim_important <- str_locate_all(Vim, pat)
+
+# Get a count of total records within the Vim section
+f <- 0
+for(i in vim_important){f <- f+(dim(i)[1])}
+
+# Set up a table to hold the records
+vim_records <- tibble(
+  "DOB" = rep("NA", f), 
+  "Name" = rep("NA", f),
+  "Submission_Date" = rep("NA", f))
+
+n <- 1
+for(i in 1:length(Vim)[1]){
+  if(i %% 10==0) {print(paste("Processing page ", i))}
+  if(i %% 100==0) {cat(round((i/length(Vim))*100, digits=0), "% completed...")}  
+  if(length(vim_important[[i]]==0)){} # Skip if no records on this page
+  if(length(vim_important[[i]]>0)){
+    for(j in 1:dim(vim_important[[i]])[1]){ # for each dob in that page
+      # pull start and end index for this item
+      vim_start <- vim_important[[i]][j,1]
+      vim_end <- vim_important[[i]][j,2]
+      # use the indices to grab the string
+      V <- substr(Vim[i], vim_start, vim_end)
+      # DOB will be the first date match in the string
+      B <- str_extract(V, pat2)
+      # Find the submission date at the end of the string
+        # nest using the second pattern, pulling from the end of the string only
+      D <- str_extract(substr(V, nchar(V)-11, nchar(V)), pat2)
+      # Find the Name
+      Nam <- str_extract(V, pat3)
+
+      # apply the string to the records table
+      vim_records$DOB[n] <- B
+      vim_records$Name[n] <- Nam      
+      vim_records$Submission_Date[n] <- D
+
+      n <- n+1 # iterate up for next loop & next row in final table# pull date for this record
+    }
+  }
+}
+```
+
+
+Review Vim and print to file
+```{r}
+# Summarize the transmissions
+vim_summary <- vim_records %>% 
+  mutate(
+    Submission_Week = week(anydate(Submission_Date)),
+    Submission_Date = anydate(Submission_Date))  %>% 
+  group_by(DOB, Name, Submission_Week) %>% 
+  summarise(n=n())
+
+# plot
+vim_plot <- ggplot(vim_summary) +
+  aes(x = Submission_Week, fill = Submission_Week) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Successful Vim Transmissions",
+    x = "Week of record submission",
+    y = "Number of transmissions",
+    fill = "Submission_Week"
+  ) +
+  theme_bw() + 
+  theme(legend.position = "none") 
+
+vim_plot
+
+# write the vim transmissions to file
+write.xlsx(vim_records, paste0(DIR, "/Records of successful Vim Transmissions.xlsx"), overwrite = TRUE)
+
+```
