@@ -1,0 +1,59 @@
+This code allows for R to connect to a PostgreSQL database. 
+There are steps prior to running this code:
+1) Connect to the VPN if working remotely
+2) Use the Windows search bar to find the "ODBC Data Source Administrator 64-bit" application
+3) Under "User DSN" tab, click the button to "Add..." a connection
+4) Choose the connection type that your database is
+5) Enter the connection parameters, username, and password for databases you will be using. You either already have this for use with DB visualizer/NaviCat/etc or can obtain from the person who manages databases.
+    Data Source = Give it a name of your choice
+    Database = the name of the database as you currently have it named when used through other connections
+    Description = Give it a description of your choice
+    Server = find this in the database configurations
+    Port = find this in the database configurations
+    User Name = the login Name for the database
+    Password = the password for the database
+
+This video is helpful, but choose the type you need as the connection type
+"https://www.youtube.com/watch?v=PoA23UWvXuc#"
+
+# Load the package to make connections
+```{r}
+library(RODBC)
+```
+    
+# Connect to the database name that you created in Windows ODBC 64-bit application
+```{r}
+myConnection <- RODBC::odbcConnect("databaseName", rows_at_time=1)
+```
+
+# Save the sql query I will need, as text
+## use the format schema.table when selecting!
+```{r}
+sql <- "
+select * from test.test
+limit 5
+"
+```
+
+# Pull in data and make a table!
+```{r}
+myData <- sqlQuery(db_con_covid19, sql, stringsAsFactors=FALSE)
+```
+
+# Make a new view in the database! -CUSTOMIZE THESE PARAMETERS
+```{r}
+sqlSave(channel, dat, tablename = NULL, append = FALSE,
+        rownames = TRUE, colnames = FALSE, verbose = FALSE,
+        safer = TRUE, addPK = FALSE, typeInfo, varTypes,
+        fast = TRUE, test = FALSE, nastring = NULL)
+```
+
+# Update a view in the database!
+```{r}
+sqlUpdate(channel, dat, tablename = NULL, index = NULL,
+          verbose = FALSE, test = FALSE, nastring = NULL,
+          fast = TRUE)
+```
+
+See more: 
+https://rdrr.io/cran/RODBC/man/sqlSave.html
