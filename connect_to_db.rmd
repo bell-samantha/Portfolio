@@ -37,7 +37,7 @@ limit 5
 
 # Pull in data and make a table!
 ```{r}
-myData <- sqlQuery(db_con_covid19, sql, stringsAsFactors=FALSE)
+myData <- sqlQuery(myConnection, sql, stringsAsFactors=FALSE)
 ```
 
 # Make a new view in the database! -CUSTOMIZE THESE PARAMETERS
