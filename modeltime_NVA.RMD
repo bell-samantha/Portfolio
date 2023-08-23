@@ -1,0 +1,501 @@
+---
+title: "Forecast Model - All Categories 2023"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+# SAMANTHA BELL 2022
+# THIS SCRIPT USES MATT DANCHO's MODELTIME SUITE TO CREATE A FINANCIAL FORECAST FOR HD
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  
+  out.width='100%',
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 5,
+  
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+
+<br>
+
+Forecasting with `tidymodels to perform classical time series analysis:
+
+- __Modeltime models__ like `arima_reg()`, `arima_boost()`, `exp_smoothing()`, `prophet_reg()`, `prophet_boost()`, and more
+- __Parsnip models__ like `linear_reg()`, `mars()`, `svm_rbf()`, `rand_forest()`, `boost_tree()` and more
+
+See [_"Model List"_](https://business-science.github.io/modeltime/articles/modeltime-model-list.html) for the full list of `modeltime` models. 
+
+PART 1 
+1. Collect data and split into training and test sets
+2. Create & Fit Multiple Models
+3. Add fitted models to a __Model Table__
+4. __Calibrate__ the models to a testing set.
+5. Perform Testing Set _Forecast_ & _Accuracy_ Evaluation
+6. __Refit__ the models to Full Dataset & _Forecast_ Forward
+
+
+```{r, include = FALSE}
+library(xgboost)
+library(tidymodels)
+library(modeltime)
+library(tidyverse)
+library(lubridate)
+library(timetk)
+library(anytime)
+library(modeltime.resample)
+library(modeltime.ensemble)
+library(svDialogs)
+
+# This toggles plots from plotly (interactive) to ggplot (static)
+interactive <- TRUE
+```
+
+### Step 1 - Collect data and split into training and test sets. 
+
+Loaded historic monthly revenue from official vendor reports
+```{r, include=FALSE}
+dat <- read_csv("N:/Category Management/Bell Sam/Projects/Modeling/Modeltime/2023 forecast/NVA_data.csv")  %>% select("date", "id", "Revenue" )
+dat <- dat %>%  mutate(
+  id = as.factor(id),
+  date = anydate(date), 
+  value = as.numeric(`Revenue`) # Filter for Revenue or TTM Revenue
+)
+
+
+```
+
+Visualize the dataset:
+
+```{r}
+dat %>%
+  plot_time_series(date, value, .interactive = interactive)
+
+```
+
+
+Split the data into training and test sets using `initial_time_split()`
+
+```{r}
+# Split data 90/10
+splits <- initial_time_split(dat, prop = 0.9)
+splits %>%
+  tk_time_series_cv_plan() %>%
+  plot_time_series_cv_plan(date, value)
+```
+
+
+### Step 2 - Create & Fit Multiple Models
+
+Get a few basic models developed:
+
+- ARIMA
+- Exponential Smoothing
+- Linear Regression
+- MARS (Multivariate Adaptive Regression Splines)
+
+
+__Important note: Handling Date Features__
+
+_Modeltime models_ (e.g. `arima_reg()`) are created with a date or date time feature in the model. 
+
+_Parsnip models_ (e.g. `linear_reg()`) typically should not have date features, but may contain derivatives of dates (e.g. month, year, etc). 
+
+#### Model 1: Auto ARIMA (Modeltime)
+
+Create a basic univariate ARIMA model using "Auto Arima" using `arima_reg()`
+
+```{r, message=TRUE}
+# Model 1: auto_arima ----
+model_fit_arima_no_boost <- arima_reg() %>%
+    set_engine(engine = "auto_arima") %>%
+    fit(value ~ date, data = training(splits))
+```
+
+#### Model 2: Boosted Auto ARIMA (Modeltime)
+
+Create a boosted ARIMA using `arima_boost()`. Boosting uses XGBoost to model the ARIMA errors. Note that model formula contains both a date feature and derivatives of date
+ - ARIMA uses the date
+ - XGBoost uses the derivatives of date as regressors
+
+```{r, message=TRUE}
+# Model 2: arima_boost ----
+model_fit_arima_boosted <- arima_boost(
+    min_n = 2,
+    learn_rate = 0.015
+) %>%
+    set_engine(engine = "auto_arima_xgboost") %>%
+    fit(value ~ date + as.numeric(date) + factor(month(date, label = TRUE), ordered = F),
+        data = training(splits))
+```
+
+
+#### Model 3: Exponential Smoothing (Modeltime)
+
+Create an Error-Trend-Season (ETS) model using an Exponential Smoothing State Space model. This is accomplished with `exp_smoothing()`.
+
+```{r, message=TRUE}
+# Model 3: ets ----
+model_fit_ets <- exp_smoothing() %>%
+    set_engine(engine = "ets") %>%
+    fit(value ~ date, data = training(splits))
+```
+
+#### Model 4: Prophet (Modeltime)
+
+Create a `prophet` model using `prophet_reg()`.
+
+```{r, message=TRUE}
+# Model 4: prophet ----
+# Can adjust seasonality by day week year
+model_fit_prophet <- prophet_reg(seasonality_yearly = TRUE) %>%
+    set_engine(engine = "prophet") %>%
+    fit(value ~ date, data = training(splits))
+```
+
+#### Model 5: Linear Regression (Parsnip)
+
+Model time series linear regression (TSLM) using the `linear_reg()` algorithm from `parsnip`. The following derivatives of date are used:
+
+- _Trend:_ Modeled using `as.numeric(date)`
+- _Seasonal:_ Modeled using `month(date)`
+
+```{r, message=TRUE}
+# Model 5: lm ----
+model_fit_lm <- linear_reg() %>%
+    set_engine("lm") %>%
+    fit(value ~ as.numeric(date) + factor(month(date, label = TRUE), ordered = FALSE),
+        data = training(splits))
+
+model_fit_glm <- linear_reg(penalty = 0.01) %>%
+    set_engine("glmnet") %>%
+    fit(value ~ factor(year(date), ordered = FALSE) + factor(month(date, label = TRUE), ordered = FALSE) + as.numeric(date),
+        data = training(splits))
+```
+
+#### Model 6: MARS (Workflow)
+
+Model a Multivariate Adaptive Regression Spline model using `mars()`. Modified the process to use a `workflow` to standardize the preprocessing of the features that are provided to the machine learning model (mars). 
+
+```{r, message=TRUE}
+# Model 6: earth ----
+model_spec_mars <- mars(mode = "regression") %>%
+    set_engine("earth") 
+
+recipe_spec <- recipe(value ~ date, data = training(splits)) %>%
+    step_date(date, features = "month", ordinal = FALSE) %>%
+    step_mutate(date_num = as.numeric(date)) %>%
+    step_normalize(date_num) %>%
+    step_rm(date)
+  
+wflw_fit_mars <- workflow() %>%
+    add_recipe(recipe_spec) %>%
+    add_model(model_spec_mars) %>%
+    fit(training(splits))
+```
+
+
+### Step 3 - Add fitted models to a Model Table. 
+
+```{r, paged.print = FALSE}
+models_tbl <- modeltime_table(
+    model_fit_arima_no_boost,
+    model_fit_arima_boosted,
+    model_fit_ets,
+    model_fit_prophet,
+    model_fit_lm,
+    model_fit_glm,
+    wflw_fit_mars
+)
+
+models_tbl
+```
+
+### Step 4 - Calibrate the model to a testing set. 
+
+Calibrating adds a new column, `.calibration_data`, with the test predictions and residuals inside. A few notes on Calibration:
+
+- Calibration is how confidence intervals and accuracy metrics are determined 
+- ___Calibration Data___ is simply forecasting predictions and residuals that are calculated from out-of-sample data.
+- After calibrating, the calibration data follows the data through the forecasting workflow. 
+
+```{r, paged.print = FALSE}
+calibration_tbl <- models_tbl %>%
+    modeltime_calibrate(new_data = testing(splits))
+
+calibration_tbl
+```
+
+### Step 5 - Testing Set Forecast & Accuracy Evaluation
+
+There are 2 critical parts to an evaluation.
+
+- Visualizing the Forecast vs Test Data Set
+- Evaluating the Test (Out of Sample) Accuracy
+
+#### 5A - Visualizing the Forecast Test
+
+Visualizing the Test Error is easy to do using the __interactive plotly visualization (just toggle the visibility of the models using the Legend).__ 
+
+```{r}
+calibration_tbl %>%
+    modeltime_forecast(
+        new_data    = testing(splits),
+        actual_data = dat
+    ) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive      = interactive
+    )
+
+```
+
+#### 5B - Accuracy Metrics
+
+We can use `modeltime_accuracy()` to collect common accuracy metrics. The default reports the following metrics using `yardstick` functions:
+
+- __MAE__ - Mean absolute error, `mae()`
+- __MAPE__ - Mean absolute percentage error, `mape()`
+- __MASE__ - Mean absolute scaled error, `mase()`
+- __SMAPE__ - Symmetric mean absolute percentage error, `smape()`
+- __RMSE__ - Root mean squared error, `rmse()`
+- __RSQ__ - R-squared, `rsq()`
+
+```{r}
+calibration_tbl %>%
+    modeltime_accuracy() %>%
+    table_modeltime_accuracy(
+        .interactive = interactive
+    )
+```
+
+__NARROWING DOWN MODELS__
+
+Let's keep most of the potentially good models and see how they perform after refitting. 
+Remove badly fitting models
+```{r}
+dlg_message("Edit this code block to choose your favorite model(s)")
+
+# Keep only that tested well
+inc_model <- c("ARIMA(0,1,1)(0,0,1)[12] WITH DRIFT", "ARIMA(0,1,1)(0,0,1)[12] WITH DRIFT W/ XGBOOST ERRORS", "LM", "GLMNET")
+calibration_tbl <- calibration_tbl %>% filter(.model_desc %in% inc_model)
+```
+
+
+### Step 6 - Refit to Full Dataset & Forecast Forward
+
+The final step is to refit the models to the full dataset using `modeltime_refit()` and forecast them forward. 
+
+```{r, paged.print = F, message=F}
+refit_tbl <- calibration_tbl %>%
+    modeltime_refit(data = dat)
+
+# Can change time to forecast out - years months 
+refit_tbl %>%
+    modeltime_forecast(h = "12 months", actual_data = dat) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive      = interactive
+    )
+```
+
+## Refitting - What happened? 
+
+More often than not refitting is a good idea. Refitting:
+
+- Retrieves your model and preprocessing steps
+- Refits the model to the new data
+- Recalculates any automations. This includes:
+    - Recalculating the long-term trend for Linear Model
+    - Recalculating the changepoints for the Earth Model
+    - Recalculating the ARIMA and ETS parameters
+- Preserves any parameter selections. This includes:
+    - XGBoost Parameters in the Boosted ARIMA `min_n = 2`, `learn_rate = 0.015`.
+    - Any other defaults that are not automatic calculations are used.
+
+
+--------------------------------------------------------------------------------------------
+PART 2
+## NEXT - We will move on to resampling in order to confirm the best forecast stability. 
+
+### Step 1 - Make a Cross-Validation Training Plan
+
+We'll use `timetk::time_series_cv()` to generate 4 time-series resamples.
+
+- Assess is the assessment window: `"2 years"`
+- Initial is the training window: `"5 years"`
+- Skip is the shift between resample sets: `"2 years`
+- Slice Limit is how many resamples to generate: `4`
+
+```{r}
+resamples_tscv <- time_series_cv(
+    data        = dat,
+    assess      = "1 years",
+    initial     = "1 years",
+    skip        = "1 years",
+    slice_limit = 5
+)
+
+resamples_tscv
+```
+
+
+Next, visualize the resample strategy to make sure we're happy with our choices.
+
+```{r}
+# Begin with a Cross Validation Strategy
+resamples_tscv %>%
+    tk_time_series_cv_plan() %>%
+    plot_time_series_cv_plan(date, value, .facet_ncol = 2, .interactive = FALSE)
+```
+
+### Step 2 - Make a Modeltime Table
+Use the same modeltime table that was created in part 1 
+
+
+### Step 3 - Generate Resample Predictions
+
+Generate resample predictions using `modeltime_fit_resamples()`:
+
+- Use the `dat_models` (models) and `dat_training_resamples`
+- Internally, each model is refit to each training set of the resamples
+- A column is added to the _Modeltime Table_: `.resample_results` contains the resample predictions
+
+```{r}
+dat_models  <- calibration_tbl %>%
+    modeltime_refit(data = dat)
+```
+
+```{r}
+resamples_fitted <- dat_models %>%
+    modeltime_fit_resamples(
+        resamples = resamples_tscv,
+        control   = control_resamples(verbose = FALSE)
+    )
+
+resamples_fitted
+```
+
+### Step 4 - Evaluate the Results
+
+#### Accuracy Plot
+
+Visualize the model resample accuracy using `plot_modeltime_resamples()`. 
+
+```{r}
+resamples_fitted %>%
+    plot_modeltime_resamples(
+      .point_size  = 3, 
+      .point_alpha = 0.8,
+      .interactive = FALSE
+    )
+```
+
+```{r}
+resamples_fitted  %>%
+    modeltime_accuracy() %>%
+    table_modeltime_accuracy(
+        .interactive = interactive
+    )
+```
+
+#### Accuracy Table
+
+We can compare the overall modeling approaches by evaluating the results with `modeltime_resample_accuracy()`. The default is to report the average `summary_fns = mean`, but this can be changed to any summary function or a list containing multiple summary functions (e.g. `summary_fns = list(mean = mean, sd = sd)`). 
+
+```{r}
+resamples_fitted %>%
+    modeltime_resample_accuracy(summary_fns = mean) %>%
+    table_modeltime_accuracy(.interactive = FALSE)
+```
+
+__NARROWING DOWN THE MODELS__ 
+
+A) Keep best performing model
+```{r}
+dlg_message("Edit this code block to choose your favorite model(s)")
+inc_model <- c("LM")
+calibration_tbl2 <- calibration_tbl %>% filter(.model_desc %in% inc_model)
+
+```
+
+```{r, paged.print = F, message=F}
+refit_tbl <- calibration_tbl2 %>%
+    modeltime_refit(data = dat)
+
+refit_tbl %>%
+    modeltime_forecast(h = "12 months", actual_data = dat) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive      = interactive
+    )
+```
+
+B) Ensemble
+See how the ensemble of the best models performs on the test data
+```{r}
+dlg_message("Edit this code block to choose your favorite model(s)")
+
+TTM_models <- modeltime_table(
+    model_fit_arima_no_boost,
+    model_fit_glm
+)
+
+ensemble_fit_mean <- TTM_models %>%
+    ensemble_average(type = "mean")
+
+ensemble_fit_med <- TTM_models %>%
+    ensemble_average("median")
+
+ensemble_fit_wt <- TTM_models %>%
+    ensemble_weighted(loadings = c(1,1))
+
+ensemble_models_tbl <- modeltime_table(
+    ensemble_fit_mean,
+    ensemble_fit_med,
+    ensemble_fit_wt
+)
+ensemble_models_tbl
+
+# Check accuracy
+ensemble_models_tbl %>%
+    modeltime_accuracy(testing(splits)) %>%
+    table_modeltime_accuracy(.interactive = FALSE)
+
+ensemble_models_tbl %>%
+    modeltime_forecast(
+        new_data    = testing(splits),
+        actual_data = dat
+    ) %>%
+    plot_modeltime_forecast(.interactive = TRUE)
+```
+Refit and forecast
+```{r}
+refit_tbl2 <- ensemble_models_tbl %>%
+    modeltime_refit(data = dat)
+
+refit_tbl2 %>%
+    modeltime_forecast(h = "12 months", actual_data = dat) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive      = interactive
+    )
+```
+
+Write a table of the chosen model(s)
+```{r}
+forecast_tbl <- refit_tbl2 %>%
+    modeltime_forecast(h = "12 months", actual_data = dat)
+
+write.csv(forecast_tbl, file = "N:/Category Management/Bell Sam/Projects/Modeling/Modeltime/2023 forecast/2023 Rev Forecast.csv")
+```
+
+
