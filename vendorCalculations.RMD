@@ -1,0 +1,386 @@
+---
+title: "Calculate and Combine Vendor Data"
+author: "SLB"
+date: '2022-03-29'
+output: html_document
+---
+This script takes in the raw monthly vendor data, cleans it up, makes calculations, and exports the standardized fields for each vendor. 
+The processed data will be able to be added to the ongoing vendor data Excel files- used for powerbi reporting. 
+
+
+##Load the libraries we need
+```{r libraries}
+library(tidyverse)
+library(lubridate)
+library(anytime)
+library(openxlsx)
+library(svDialogs)
+library(readxl)
+library(stringr)
+library(openxlsx)
+library(janitor)
+```
+
+##Load the raw data
+# Each month will require the following:
+#     COVETRUS: CR_RevByVet_Detail_NVA_[date].xls
+#     VETSOURCE: [date] NVA Ext.xlsx
+#     Hill's to Home: [date] NVA Recon.xlsx
+#     Vetcove: [Year]NVA_[Month]_Payouts.xlsx
+
+
+```{r}
+# What period are we working on?
+period <- dlg_input(message="Enter the date for the month period we are working with, with '01' as the day field (ex: 2022-06-01)")$res
+period <- anydate(period)
+
+# Hills
+dlg_message(paste("Select the monthly Hill's to Home file for", period))
+H2H_PATH <- dlg_open("N:/Category Management/Home Delivery Reporting/Raw Vendor Data/H2H Monthly")$res
+H2H_SHEETS <- readxl::excel_sheets(H2H_PATH)
+H2H <- readWorkbook(H2H_PATH, sheet = grep("HTH", H2H_SHEETS, ignore.case=TRUE), detectDates = TRUE)
+
+# Covetrus
+dlg_message(paste("Select the monthly Covetrus file for", period))
+CVET_PATH <- dlg_open("N:/Category Management/Home Delivery Reporting/Raw Vendor Data/Covetrus Monthly")$res
+CVET_SHEETS <- readxl::excel_sheets(CVET_PATH)
+CVET_TIBBLES <- lapply(CVET_SHEETS, function(x) readxl::read_xls(CVET_PATH, sheet=x))
+ # join all CVET sheets together
+CVET <- CVET_TIBBLES[[1]] # start with the first one
+colnames(CVET) <- 1:dim(CVET_TIBBLES[[1]])[2]
+ for(i in 2:length(CVET_TIBBLES)){ #add others
+   j <- CVET_TIBBLES[[i]]
+   colnames(j) <- colnames(CVET)
+   CVET <- rbind2(CVET, j)
+ }
+
+# VetSource
+dlg_message(paste("Select the monthly Vetsource file for", period))
+VS_PATH <- dlg_open("N:/Category Management/Home Delivery Reporting/Raw Vendor Data/VetSource Monthly")$res
+VS_SHEETS <- readxl::excel_sheets(VS_PATH)
+VS <- readxl::read_xlsx(VS_PATH, sheet=grep("Data", VS_SHEETS)) #Load the sheet with the Data for that month
+
+# Vetcove
+dlg_message(paste("Select the monthly Vetcove file for", period))
+VC_PATH <- dlg_open("N:/Category Management/Home Delivery Reporting/Raw Vendor Data/Vetcove Monthly")$res
+VC <- readxl::read_xlsx(VC_PATH)
+```
+
+# Clean up Covetrus
+```{r}
+# Remove header if not already the column names
+headRow <- which(CVET[,1] == "Practice Name") 
+colnames(CVET) <- CVET[headRow,]
+CVET <- CVET[-(1:headRow),]
+
+# Remove "total" rows
+CVET <- CVET %>% mutate(totalRow = grepl("(tot)|(dvm)|(vmd)", `Practice Name`, ignore.case = TRUE))
+totalRows <- CVET %>% filter(totalRow==TRUE)
+CVET <- CVET %>% filter(totalRow==FALSE) %>% select(-totalRow) %>% filter(!is.na(`Cart ID`))
+
+# How many missing hospital numbers are there?
+missingHosp <- is.na(CVET$`Hospital #`)
+table(missingHosp)
+dlg_message(paste("You have", length(which(missingHosp==TRUE)), "Covetrus rows with missing NVA hospital number."))
+
+# Pull in key of Covetrus site numbers to DVM names (from previous reports)
+CVET_key <- readxl::read_xlsx("N:/Category Management/Home Delivery Reporting/Other Resources/Covetrus hospital number and DVM.xlsx") %>% filter(!is.na(Hospital))
+
+# Fill in some missing site numbers
+CVET <- CVET %>% mutate(rowNum = row_number())
+
+for(i in 1:dim(CVET[missingHosp,])[1]){
+  row <- CVET$rowNum[missingHosp][i]
+  lookup <- CVET_key$Hospital[which(CVET_key$Veterinarian==CVET$Veterinarian[row])]
+  if(!is_empty(lookup)){CVET$`Hospital #`[row] <- lookup}
+}
+
+# Check again for missing numbers
+missingHosp2 <- is.na(CVET$`Hospital #`)
+table(missingHosp2)
+dlg_message(paste("We were able to successfully fill in", length(which(missingHosp==TRUE))-length(which(missingHosp2==TRUE)), "(", 
+round((length(which(missingHosp==TRUE))-length(which(missingHosp2==TRUE)))/length(which(missingHosp==TRUE))*100, digits = 0), "% ) Covetrus rows which had a missing NVA hospital number. Be sure to keep the reference file 'Covetrus rows with missing NVA hospital number.xlsx' updated for future use."))
+# Remove any "s" from hospital ids entries - these are sister sites
+CVET$`Hospital #` <- gsub("\\.s", "", CVET$`Hospital #`, ignore.case=TRUE)
+
+# Fix hospital numbers: There is no hospital 828, it should be 142
+CVET$`Hospital #` <- gsub("828", 142, CVET$`Hospital #`)
+
+# Export unique DVM and site number combos to add some to the key (if any are new)
+vets <- CVET %>% group_by(`Hospital #`, `Practice Name`, Veterinarian) %>% summarise() 
+
+missingHosp <- vets %>% filter(is.na(`Hospital #`)&!is.na(Veterinarian))
+write.xlsx(missingHosp, "N:/Category Management/Home Delivery Reporting/Monthly Combined Calculations/CVET DVMs missing hospital number.xlsx")
+
+vets <- vets %>% filter(!is.na(`Hospital #`)&!is.na(Veterinarian))
+write.xlsx(vets, "N:/Category Management/Home Delivery Reporting/Monthly Combined Calculations/Use to update CVET DVM list.xlsx")
+
+# View DVMs missing site numbers still
+CVET[missingHosp2,] %>% group_by(`Hospital #`, `Practice Name`, Veterinarian) %>% summarise() 
+```
+
+## Make the new standardized fields for Covetrus
+```{r}
+# reformat ship date
+CVET$Shipped <- openxlsx::convertToDate(CVET$Shipped)
+# Make all NA numbers 0
+CVET$`Product Revenue`[is.na(CVET$`Product Revenue`)] <- 0
+CVET$Handling[is.na(CVET$Handling)] <- 0 
+CVET$`Client Total`[is.na(CVET$`Client Total`)] <- 0
+CVET$`Product Cost`[is.na(CVET$`Product Cost`)] <- 0
+CVET$`Service Fee`[is.na(CVET$`Service Fee`)] <- 0
+CVET$`Sales Tax`[is.na(CVET$`Sales Tax`)] <- 0
+CVET$`Practice Total`[is.na(CVET$`Practice Total`)] <- 0
+CVET$`Net Margin`[is.na(CVET$`Net Margin`)] <- 0
+
+CVET_CLEAN <- CVET %>% mutate(
+  `Hospital Number` = gsub("\\*failed to decode utf16\\*", "", as.character(`Hospital #`)),
+  `Hospital Name` = "",
+  Division = "",
+  Group = "",
+  `Cart Number` = as.character(`Cart ID`),
+  Period = period,
+  Client = `Client Name`,
+  `Pet Name` = Patient,
+  Description = gsub("\\*failed to decode utf16\\*", "", Description), 
+  Quantity = Qty, 
+  Revenue = as.numeric(`Client Total`),
+  Cost = abs(as.numeric(`Product Cost`)),
+  `Full Cost` =  abs(as.numeric(`Practice Total`)),
+  `Net Profit` = `Net Margin`, 
+  Partner = "CVET", 
+  GL = as.numeric(`NVA GL#`), 
+  Autoship = `Autoship?`, 
+  Refill = `Refill?`, 
+  Rx = Rx, 
+  `Client PIMS ID` = "",
+  `Patient PIMS ID` = ""
+)
+CVET_CLEAN <- CVET_CLEAN %>% select(`Hospital Number`, `Hospital Name`, Group, Division, `Cart Number`, Period, Client, `Pet Name`, Description, Quantity, 
+                                Revenue, Cost, `Full Cost`, `Net Profit`, Partner, GL, Autoship, Refill, Rx, `Client PIMS ID`, `Patient PIMS ID`)
+
+```
+## Make the new standardized fields for VetSource
+```{r}
+# Remove rows without order number - these are blank or total rows
+VS <- VS %>% filter(!is.na(`Order Vso ID`))
+
+# Turn NA numbers to 0
+VS$`Unit Price`[is.na(VS$`Unit Price`)] <- 0
+VS$`Groups Reporting: Net Sales`[is.na(VS$`Groups Reporting: Net Sales`)] <- 0
+VS$`Groups Reporting: DVM Auth/Affiliate Commission`[is.na(VS$`Groups Reporting: DVM Auth/Affiliate Commission`)] <- 0
+VS$`Sales Tax`[is.na(VS$`Sales Tax`)] <- 0
+VS$`Wholesale Amount`[is.na(VS$`Wholesale Amount`)] <- 0
+VS$`Wholesale Tax`[is.na(VS$`Wholesale Tax`)] <- 0
+VS$`Marketplace Facilitator Tax`[is.na(VS$`Marketplace Facilitator Tax`)] <- 0
+VS$`Credit Card Fee`[is.na(VS$`Credit Card Fee`)] <- 0
+VS$`Vetsource Fee`[is.na(VS$`Vetsource Fee`)] <- 0
+VS$`Promotion Credit Amount`[is.na(VS$`Promotion Credit Amount`)] <- 0
+VS$`Net Profits`[is.na(VS$`Net Profits`)] <- 0
+VS$`Net Proceeds`[is.na(VS$`Net Proceeds`)] <- 0
+
+VS_CLEAN <- VS %>% mutate(
+  `Hospital Number` = as.character(`Corporate ID`),
+  `Hospital Name` = "",
+  Division = "",
+  Group = "",
+  `Cart Number` = as.character(`Order Vso ID`),
+  Period = period,
+  Client = paste(`Client First Name`, `Client Last Name`),
+  `Pet Name` = `Patient Name`,
+  Description = `Display Name`, 
+  Quantity = `Line Quantity`, 
+  Revenue = as.numeric(`Groups Reporting: Net Sales`)+as.numeric(`Promotion Credit Amount`),
+  Cost = as.numeric(`Wholesale Amount`),
+  `Full Cost` =  as.numeric(`Sales Tax`)  + abs(as.numeric(`Wholesale Amount`)) + as.numeric(`Wholesale Tax`) + as.numeric(`Marketplace Facilitator Tax`) + abs(as.numeric(`Credit Card Fee`)) + abs(as.numeric(`Vetsource Fee`)),
+  `Net Profit` = `Net Profits`, 
+  Partner = "VS", 
+  GL = as.numeric(`GL Code Per NVA`), 
+  Autoship = "Unknown", 
+  Refill = "Unknown", 
+  Rx = "Unknown", 
+  `Client PIMS ID` = "",
+  `Patient PIMS ID` = ""
+)
+VS_CLEAN <- VS_CLEAN %>%  select(`Hospital Number`, `Hospital Name`, Group, Division, `Cart Number`, Period, Client, `Pet Name`, Description, Quantity, 
+                                Revenue, Cost, `Full Cost`, `Net Profit`, Partner, GL, Autoship, Refill, Rx, `Client PIMS ID`, `Patient PIMS ID`)
+```
+
+## Make the new standardized fields for Hills to Home
+```{r}
+# Remove extra rows
+H2H <- H2H[,1:25]
+# Remove total row by including only valid order numbers
+H2H <- H2H %>% mutate(Order = PoNumber) %>% filter(grepl("HTH", `Order`))
+
+# Turn NA numbers to 0
+H2H$Order.Total[is.na(H2H$OrderTotal)] <- 0
+H2H$Sales.Tax[is.na(H2H$SalesTax)] <- 0
+H2H$`Shipping./.Surcharge`[is.na(H2H$`Shipp_Surcharge`)] <- 0
+H2H$List.Price[is.na(H2H$ListPrice)] <- 0
+H2H$Service.Fee[is.na(H2H$ServiceFee)] <- 0
+H2H$Total.Discount[is.na(H2H$Total_Discount)] <- 0
+H2H$Clinic.Funded.Discount[is.na(H2H$Promo_Discount)] <- 0
+H2H$Clinic.Sales.Tax[is.na(H2H$Clinic_Sales_Tax)] <- 0
+H2H$Profit[is.na(H2H$VProfit)] <- 0
+H2H$Stripe.Fee[is.na(H2H$StripeFee)] <- 0
+H2H$Net[is.na(H2H$VNet)] <- 0
+H2H$Price[is.na(H2H$PPrice)] <- 0
+
+# We need to make sure that all refund rows are negated in the proper columns, if not, we will fix them. 
+	#Refund rows should have a negative value for: VNet, VProfit, Total_Discount, OrderTotal
+	#Refund rows should have a positive value for: SalesTax, ListPrice, ServiceFee, StripeFee
+H2H_refunds <- H2H %>% filter(Refund == "Refund")
+if(sum(H2H_refunds$VNet)>0){
+  dlg_message("The Hills to Home data does not have refund rows as negative rows - this will be fixed and replaced.")
+  H2H_refunds <- H2H_refunds %>% mutate(
+    VNet = -abs(VNet), 
+    VProfit = -abs(VProfit), 
+    Total_Discount = -abs(Total_Discount), 
+    OrderTotal = -abs(OrderTotal), 
+    SalesTax = abs(SalesTax), 
+    ListPrice = abs(ListPrice), 
+    ServiceFee = abs(ServiceFee), 
+    StripeFee = abs(StripeFee)
+  )
+  H2H_sales <- anti_join(H2H, H2H_refunds)
+  H2H <- rbind(H2H_sales, H2H_refunds)
+  if(sum(H2H_refunds$VNet)<0){
+  dlg_message("The Hills to Home data now has refund rows as negative rows. Replacement rows have been saved.")
+  }
+}else(dlg_message("The Hills to Home data already has refund rows as negative rows - no action will be taken."))
+
+
+
+H2H_CLEAN <- H2H %>% mutate(
+  `Hospital Number` = as.character(hosp.number), 
+  `Hospital Name` = "", 
+  Group = "",
+  Division = "",
+  `Cart Number` = as.character(Order), 
+  Period = period,
+  Client = PetParent,
+  `Pet Name` = "",
+  Description = "", 
+  Quantity = 1,
+  Revenue = as.numeric(OrderTotal)+as.numeric(SalesTax)+ abs(as.numeric(Promo_Discount))+as.numeric(Clinic_Sales_Tax), #UPDATED 5/2023 because Promo Discount field is negative and already subtracted from OrderTotal
+  Cost = abs(as.numeric(ListPrice)+ as.numeric(Total_Discount)), # list price is neg, discount is pos, then abs reverses the overall sign at end
+  `Full Cost` =  abs(as.numeric(ListPrice)+ as.numeric(Total_Discount)) + abs(as.numeric(SalesTax)) + abs(as.numeric(ServiceFee)) + abs(as.numeric(StripeFee)),
+  `Net Profit` = VNet, 
+  Partner = "H2H",
+  GL = 14, 
+  Autoship = "Unknown", 
+  Refill = "Unknown", 
+  Rx = "Unknown", 
+  `Client PIMS ID` = "",
+  `Patient PIMS ID` = ""
+)
+H2H_CLEAN <- H2H_CLEAN %>%  select(`Hospital Number`, `Hospital Name`, Group, Division, `Cart Number`, Period, Client, `Pet Name`, Description, Quantity, 
+                                Revenue, Cost, `Full Cost`, `Net Profit`, Partner, GL, Autoship, Refill, Rx, `Client PIMS ID`, `Patient PIMS ID`)
+```
+
+## Clean up and make the new standardized fields for VetCove
+```{r}
+# Remove header
+headRow <- which(VC[,2] == "Stripe Payout ID")
+colnames(VC) <- VC[headRow,]
+VC <- VC[-(1:headRow),]
+
+# Pull in NVA ids
+VC_dir <- readxl::read_excel("N:/Category Management/Home Delivery Reporting/FILES FOR WORKBOOKS/Vetcove Facility Directory.xlsx") %>% mutate(`Vetcove ID` = as.character(`Vetcove ID`))
+VC <- VC %>% left_join(., VC_dir, by = c("Clinic ID" = "Vetcove ID"))
+
+# Pull in NVA GL codes and map the items
+VC_GL <- readxl::read_excel("N:/Category Management/Home Delivery Reporting/FILES FOR WORKBOOKS/Vetcove GL Mapping.xlsx")
+
+# Look for a match in the main and sub categories both - then pull NVA GL code from key
+VC$NVA_GL <- ""
+for(i in 1:dim(VC)[1]){
+ VC$NVA_GL[i] <- VC_GL$`NVA GL Code`[which(VC_GL$`Vetcove Main Category` %in% str_split(VC$Categories[i], ", ", simplify = TRUE)[1:3] & 
+                   VC_GL$`Vetcove Sub Category` %in% str_split(VC$Categories[i], ", ", simplify = TRUE)[1:3])][1]
+}
+
+# Make NA nunbers into 0
+VC$`Retail Sale Price`[is.na(VC$`Retail Sale Price`)] <- 0
+VC$`Urgency Fee`[is.na(VC$`Urgency Fee`)] <- 0
+VC$`Handling Fee`[is.na(VC$`Handling Fee`)] <- 0
+VC$`Shipping Charged`[is.na(VC$`Shipping Charged`)] <- 0
+VC$`Refunded Amount`[is.na(VC$`Sponsored Refund Amount`)] <- 0
+VC$`Product Cost`[is.na(VC$`Product Cost`)] <- 0
+VC$`Vendor Fees`[is.na(VC$`Vendor Fees`)] <- 0
+VC$`Clinic Discounts`[is.na(VC$`Clinic Discounts`)] <- 0
+VC$`Processing Fees`[is.na(VC$`Processing Fees`)] <- 0
+VC$`Net Revenue`[is.na(VC$`Net Revenue`)] <- 0
+
+
+# Check for missing information
+a <- VC %>% filter(is.na(`NVA ID`)) %>% group_by(`Clinic Name`) %>% summarise()
+b <- VC %>% filter(is.na(`NVA_GL`)) %>% group_by(Categories) %>% summarise()
+
+if(dim(a)[1]>0){stop("You have missing Vetcove hospital IDs! Please check table a and update your Vetcove Facility Directory accordingly. Rerun the Vetcove code block once updates to file is complete.")}
+if(dim(b)[1]>0){stop("You have missing Vetcove GL codes! Please check table b and update your Vetcove GL Mapping file accordingly. Rerun the Vetcove code block once updates to file is complete.")}
+
+# Note - Rebate discounts are not in these calculations because they are already represented in what the retail sale price for the client was)
+# Clean up other fields
+VC_CLEAN <- VC %>% mutate(
+  `Hospital Number` =  `NVA ID`, 
+  `Hospital Name` = `Clinic Name`, 
+  Group = "",
+  Division = "",
+  `Cart Number` =  `Order No.`, 
+  Period = period,
+  Client =  `Client Name`,
+  `Pet Name` = `Patient Name`,
+  Description = `Item Name`, 
+  Quantity =  Quantity,
+  Revenue =  as.numeric(`Retail Sale Price`) + abs(as.numeric(`Urgency Fee`)) + abs(as.numeric(`Handling Fee`)) + abs(as.numeric(`Shipping Charged`))
+	- abs(as.numeric(`Sponsored Refund Amount`)),
+  Cost =  abs(as.numeric(`Product Cost`)),
+  `Full Cost` =  abs(as.numeric(`Product Cost`) + as.numeric(`Vendor Fees`) + as.numeric(`Clinic Discounts`)+ as.numeric(`Processing Fees`)),
+  `Net Profit` = `Net Revenue`,
+  Partner = "Vetcove",
+  GL = NVA_GL, 
+  Autoship = Autoship, 
+  Refill = "Unknown", 
+  Rx = "Unknown", 
+  `Client PIMS ID` = `Client PIM ID`,
+  `Patient PIMS ID` = `Patient PIM ID`
+)
+VC_CLEAN <- VC_CLEAN %>%  select(`Hospital Number`, `Hospital Name`, Group, Division, `Cart Number`, Period, Client, `Pet Name`, Description, Quantity, 
+                                Revenue, Cost, `Full Cost`, `Net Profit`, Partner, GL, Autoship, Refill, Rx, `Client PIMS ID`, `Patient PIMS ID`)
+
+
+```
+
+## Combine all calculated fields together
+```{r}
+CVET_CLEAN <- CVET_CLEAN %>% mutate_all(as.character)
+VS_CLEAN <- VS_CLEAN %>% mutate_all(as.character)
+H2H_CLEAN <- H2H_CLEAN %>% mutate_all(as.character)
+VC_CLEAN <- VC_CLEAN %>% mutate_all(as.character)
+
+# Warning if a table is empty
+if(dim(CVET_CLEAN)[1]==0 | dim(VS_CLEAN)[1]==0 | dim(VC_CLEAN)[1]==0 | dim(H2H_CLEAN)[1]==0){stop("One of your vendor tables is empty, please repair and rerun before combining the tables!")}
+ALL <- full_join(CVET_CLEAN, VS_CLEAN) %>% full_join(H2H_CLEAN) %>% full_join(VC_CLEAN) 
+ALL$GL[is.na(ALL$GL)] <- 0
+ALL$`Hospital Number`[is.na(ALL$`Hospital Number`)] <- 0
+```
+
+## Print to file to allow for QC and manual addition to ongoing file(s)
+```{r}
+# Make visits summary
+t <- ALL %>% group_by(`Hospital Number`, Partner) %>% summarise(Revenue = sum(as.numeric(Revenue), na.rm=TRUE), Visits = length(unique(`Cart Number`)))
+t <- adorn_totals(t)
+colnames(t) <- c("Hospcode", "Vendor","OrderAmt", "OrderQty")
+
+# Print files
+write.xlsx(ALL, paste0("N:/Category Management/Home Delivery Reporting/Monthly Combined Calculations/", period, " Monthly Vendor Calculated Fields.xlsx"))
+
+write.xlsx(t, paste0("N:/Category Management/Home Delivery Reporting/Monthly Combined Calculations/", period, " HD Visits.xlsx"))
+
+dlg_message("The the visits report is ready! Please email to Gary Glover.", type="ok")
+
+# Print some information
+t
+```
+
