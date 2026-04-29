@@ -1,0 +1,986 @@
+---
+title: "Veterinary Ecommerce — Weekly Industry Intelligence Brief"
+subtitle: "2 Agent Workflow with Claude AI"
+author: "Samantha Bell"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+---
+
+## How This Document Works
+
+This report is fully automated — every time you knit this document, it pulls 
+fresh data from trusted veterinary and pet industry sources, passes it through 
+a research AI agent, and produces a structured intelligence brief ready for 
+VP-level review.
+
+**Two AI agents power this workflow:**
+
+- **Research Agent** — searches and summarizes content from industry sources
+- **Writing Agent** — synthesizes findings into a polished brief
+
+The code blocks below are hidden by default but can be expanded for review. 
+No manual steps are required unless a source URL or API key needs updating.
+
+
+
+```{r setup, include=FALSE}
+library(knitr)
+
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 10,
+  fig.height = 5
+)
+
+#The following packages handle everything from API calls and web scraping to data wrangling and report formatting. All must be installed before knitting.
+
+library(httr2)             # Claude API + HTTP
+library(jsonlite)          # JSON parsing
+library(tidyRSS)           # RSS ingestion
+library(gtrendsR)          # Google Trends
+library(rvest)             # HTML scraping
+library(xml2)              # XML parsing
+library(RedditExtractoR)   # Reddit API — CRAN: RedditExtractoR
+library(tidytext)          # Text mining
+library(pdftools)          # PDF text extraction (optional — Cascadia reports)
+library(tidyverse)         # Data wrangling
+library(lubridate)         # Dates
+library(kableExtra)        # Styled tables
+library(ggplot2)           # Visualisations
+library(scales)            # Axis formatting
+library(openxlsx)          # Write Excel files  
+library(anytime)           # Standardize Dates
+library(dplyr)
+library(httr)
+library(grid)
+library(gridExtra)
+library(stringr)
+library(gridtext)
+library(grDevices)
+library(Cairo)
+library(png)
+library(usethis)
+```
+
+
+## Configuration
+
+This block defines all user-adjustable settings for the report. **This is the 
+only block that should need editing between runs.** Update paths, the lookback 
+window, and image assets here before knitting.
+
+**Key parameters:**
+
+- `myWD` — working directory where agent scripts are stored
+- `outputDir` — folder where the finished brief and research exports will be saved
+- `api_key_file_path` — path to your Claude API key text file *(see API Key block below)*
+- `daysMax` — how many days back to search for recent content (default: 10)
+- `logo_path` / `stripe_path` — branding assets used in the PDF header
+
+> ⚠️ **Heads up:** All paths are currently 
+> hardcoded to a specific location. If running on a new machine or 
+> shared environment, update all paths before knitting.
+
+```{r Setup Params}
+# Where to find the agents and other functions
+# Set MY_WD, OUTPUT_DIR, and ANTHROPIC_API_KEY in your .Renviron file
+# Run usethis::edit_r_environ() to open it
+myWD      <- Sys.getenv("MY_WD")
+outputDir <- Sys.getenv("OUTPUT_DIR")
+
+# Max days ago to search for recent content
+daysMax <- 10
+
+# Brand assets — stored in the repo alongside the scripts
+logo_path   <- file.path(myWD, "NVA_GeneralPractice_Logo_White_RGB.png")
+stripe_path <- file.path(myWD, "Header Bar.PNG")
+```
+
+
+
+## API Key
+
+This block loads your Claude API key and makes it available for all subsequent 
+agent calls. 
+
+**System environment variable** *(fallback)* — checks for 
+`ANTHROPIC_API_KEY` set in your OS or IDE environment (e.g. `.Renviron` in 
+RStudio)
+=
+
+> ⚠️ **The script will stop here if no valid key is found.** 
+
+> 🔒 **Security note:** Never paste your API key directly into this script or 
+> commit the key file to version control. Always load it from an external file, 
+> environment variable, or secret manager.
+
+```{r API Key}
+# ── API key check ────────────────────────────────────────────────────────────
+# Load API key from .Renviron environment variable.
+# Run usethis::edit_r_environ() and add: ANTHROPIC_API_KEY=your_key_here
+ANTHROPIC_API_KEY <- Sys.getenv("ANTHROPIC_API_KEY")
+Sys.setenv(ANTHROPIC_API_KEY = ANTHROPIC_API_KEY)
+
+if (nchar(ANTHROPIC_API_KEY) == 0) {
+  stop("❌ ANTHROPIC_API_KEY not found. Add it to your .Renviron file and restart R.")
+} else {
+  message("✅ ANTHROPIC_API_KEY loaded from environment variable.")
+}
+```
+
+
+## Section 1: Source List
+
+This block defines the trusted industry sources used by the Research Agent. 
+Each source includes a URL and a brief description of its focus area. The 
+agent will visit each of these URLs to look for recent content.
+
+**To add or remove sources**, edit the `industry_sources` table directly — 
+one row per source. No other changes are needed.
+
+The bottom of this block dynamically generates URLs for **Today's Veterinary 
+Business**, which publishes date-based page URLs. It checks the last `daysMax` 
+days automatically, so no manual updates are needed for that source.
+
+> 📝 **Note:** Some sources use RSS feeds (`/feed`, `/rss`) while others are 
+> standard web pages. RSS feeds are preferred where available — they are faster 
+> to parse and use fewer tokens. If a source stops returning results, check 
+> whether its RSS URL has changed.
+
+```{r Sources for Research Agent}
+industry_sources <- tribble(
+  ~source,   ~url,  ~notes,
+
+  "DVM360", "https://www.dvm360.com/rss", "As a giant in the industry, dvm360 provides veterinary professionals with comprehensive resources and information to help enhance patient care and client services. We cover every angle of veterinary medicine from recent technological advancements to clinical insights to effective managerial strategies.",
+  "AVMA",   "https://www.avma.org/news/rss.xml", "The AVMA is the nation's leading advocate for the veterinary profession. Representing more than 111,000 members, we protect, promote and advance the needs of all veterinarians and those they serve.",
+  "Vet Practice News", "https://www.veterinarypracticenews.com/feed/", "Today’s Veterinary Practice will provide the premier resource for trustworthy, useful insights so companion animal veterinarians can grow in confidence, excel in their careers, and improve their standard of care.",
+  "Cornell Canine" , "https://www.vet.cornell.edu/departments-centers-and-institutes/riney-canine-health-center/canine-health-news", "Cornell University-Riney Canine Health Center will be the most-trusted and frequently consulted resource for high quality, up-to-date information regarding canine health in the world.",
+  "Pet Insight",       "https://pet-insight.com/feed/", "Pet Insight focused on bringing the industry closer together, as a forum for discussion on product trends, key milestones and partnerships. By combining retailer, distributor and supplier feedback, we provide straightforward, unbiased insight on the pet industry.",
+  "Vet Practice News - Business", "https://www.veterinarypracticenews.com/category/practice-management_page/business-finance/", "Veterinary Practice News is dedicated to informing U.S. veterinarians about industry trends, best practices and new products as it relates to practice management, small animal and equine care",
+  "Clinician's Brief", "https://www.cliniciansbrief.com/custom/industry-news", "For decades, Clinician’s Brief has helped veterinary professionals make critical decisions in veterinary medicine, earning it the #1 spot as the most essential publication for small animal veterinarians.",
+  "Brakke Consulting", "https://brakkeconsulting.com/category/news/feed/", "Established in 1986 by industry insider Ron Brakke, Brakke Consulting is the premier consulting firm serving the animal health, animal nutrition and veterinary industries. ",
+  "FDA - Outbreaks", "https://www.fda.gov/animal-veterinary/news-events/outbreaks-and-advisories", "The public health advisories listed below are written by the FDA to alert the public about pressing human and/or animal health concerns related to products regulated by the Center for Veterinary Medicine (CVM). ",
+  "FDA - Recalls",   "https://www.fda.gov/animal-veterinary/safety-health/recalls-withdrawals", "Recalls may be conducted on a firm's own initiative, by FDA request, or by FDA order under statutory authority.",
+  "Global Pet", "https://globalpetindustry.com/feed/", "Resource for the international pet industry. PETS International Magazine: in 130+ countries, 6 issues per year",
+  "PetfoodIndustry",   "https://www.petfoodindustry.com/rss/", "The global resource connecting pet food and treat manufacturers and brands with supplier companies
+",
+  "Pet Food Processing: Events", "https://www.petfoodprocessing.net/rss/topic/459-events", "News and events",
+  "Pet Food Processing: Recalls", "https://www.petfoodprocessing.net/rss/topic/472-recalls", "Food recalls",
+  "Pet Food Processing: Corporate", "https://www.petfoodprocessing.net/rss/topic/103-corporate-strategy", "Corporate news and events",
+  "Pet Food Processing: Financial", "https://www.petfoodprocessing.net/rss/topic/104-financial-performance", "Pet food financial ",
+  "Pet Food Processing Issues" , "https://www.petfoodprocessing.net/newsletters/25-pfp-weekly-wrap-up", "non RSS page"
+)
+
+# grab recent days of pages from Todays Veterinary Business - this changes each time because page URLs include date, so check for URLs and then add to the list
+recentDates <- format(seq(Sys.Date(), by = "-1 day", length.out = daysMax), "%m%d%Y")
+for(i in recentDates){
+  BusURL <- paste0("https://todaysveterinarybusiness.com/veterinary-news-", i, "/")
+  row <- c(paste("Today's Vet Business", i), BusURL, "industry-trade", "news pages within 7 days")
+  industry_sources <- rbind(industry_sources, row)
+}
+
+```
+
+
+
+## Source Freshness Check — Function Definition
+
+This block defines the `has_recent_content()` function, which checks whether 
+a given URL contains content published within the `daysMax` lookback window. 
+It is called in the next block to filter out stale sources before any AI 
+agent calls are made, saving tokens and improving result quality.
+
+**The function tries two methods in order:**
+
+1. **RSS parsing** *(preferred)* — fast and clean, uses the `rss` package to 
+read feed dates directly
+2. **HTML fallback** — if no RSS feed is found, fetches the raw page with 
+`curl` and scans the text for recognizable date patterns
+
+**Key arguments:**
+
+- `url` — the source URL to check
+- `days_back` — lookback window in days, defaults to `daysMax`
+- `verbose` — if `TRUE`, prints a ✅ or 🕰️ status message for each URL in 
+the knit log
+- `allow_browser` — if `TRUE`, attempts a headless Chrome session for 
+pages that block standard requests *(requires the `chromote` package)*
+
+> 📝 **Note:** This block only *defines* the function — it does not run it. 
+> The next block loops through all sources and calls it for each one.
+
+```{r Recent Content Function Setup}
+# Set up function to check for recent content
+has_recent_content <- function(url, days_back = daysMax, verbose = TRUE, allow_browser = FALSE) {
+
+  log <- function(...) if (isTRUE(verbose)) message(...)
+  clean_url <- function(x) trimws(gsub("[[:cntrl:]]+", "", as.character(x)))
+
+  is_blocked <- function(x) # Function to check if URL is blocked
+    nzchar(x) && grepl("incapsula|imperva|incident_id|request unsuccessful",
+                       x, ignore.case = TRUE)
+
+  parse_dates <- function(x) { # Function gathering the dates so we can tell when the latest content was created
+    x <- unique(trimws(x)); x <- x[nzchar(x)]
+    d1 <- suppressWarnings(anytime::anydate(x))
+    my <- grep("(?i)\\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\s+\\d{4}\\b",
+               x, value = TRUE, perl = TRUE)
+    my <- gsub("(?i)\\bsept\\b", "sep", gsub("\\.", "", my), perl = TRUE)
+    d2 <- suppressWarnings(as.Date(lubridate::my(my)))
+    c(d1, d2)[!is.na(c(d1, d2))]
+  }
+
+  curl_get <- function(u) { # Function to try URL with curl
+    out <- tryCatch(system2(
+      "curl",
+      args = c(
+        "--silent", "--show-error", "--location", "--compressed",
+        "--max-time", "20", "--retry", "2",
+        "-H", "User-Agent: Mozilla/5.0",
+        "-H", "Accept: */*",
+        u
+      ),
+      stdout = TRUE, stderr = TRUE
+    ), error = function(e) character())
+    paste(out, collapse = "\n")
+  }
+
+  browser_get <- function(u) { # function to use a chromote session browser with HTML
+    if (!requireNamespace("chromote", quietly = TRUE)) return("")
+    b <- chromote::ChromoteSession$new()
+    on.exit(try(b$close(), silent = TRUE), add = TRUE)
+    b$Page$navigate(u); b$Page$loadEventFired()
+    b$Runtime$evaluate("document.documentElement.outerHTML")$result$value %||% ""
+  }
+  
+  # Clean up the URL in this iteration
+  url <- clean_url(url)
+
+  ## ---- 1) RSS FIRST (cheap + clean) ----
+  feed <- tryCatch(rss::rss_feed(url), error = function(e) NULL)
+  if (!is.null(feed)) {
+    items <- tryCatch(rss::rss_items(feed), error = function(e) NULL)
+    if (!is.null(items) && nrow(items)) {
+      
+      #Look for dates in the text we pulled
+      d <- suppressWarnings(anytime::anydate(items$pubDate))
+      d <- d[!is.na(d)]
+      if (length(d)) {
+        recent <- max(d) >= Sys.time() - lubridate::days(days_back)
+        # return the status of the date
+        log(if (recent) "✅ [rss]" else "🕰️ [rss]", url)
+        return(recent)
+      }
+    }
+  }
+
+  ## ---- 2) HTML FALLBACK ----
+  html <- curl_get(url)
+  if (is_blocked(html) && allow_browser) html <- browser_get(url)
+  if (!nzchar(html) || is_blocked(html)) return(FALSE)
+
+  page <- tryCatch(rvest::read_html(html), error = function(e) NULL)
+  if (is.null(page)) return(FALSE)
+                            
+  #Look for dates in the text we pulled
+  text <- rvest::html_text2(page)
+  dates <- parse_dates(unlist(regmatches(
+    text,
+    gregexpr(
+      "\\b(?:\\d{4}-\\d{2}-\\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\\s+\\d{1,2},?\\s+\\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\\s+\\d{4})\\b",
+      text, ignore.case = TRUE
+    )
+  )))
+
+  if (!length(dates)) return(FALSE)
+
+  recent <- max(dates) >= Sys.Date() - lubridate::days(days_back)
+  # return the status of the date
+  log(if (recent) "✅ [html]" else "🕰️ [html]", url)
+  recent
+}
+``` 
+
+
+## Source Freshness Check — Run
+
+This block calls `has_recent_content()` on every row in `industry_sources` 
+and records the result in a new `keep` column. Expect this block to take 
+a minute or two to complete — it is making a live web request for each source.
+
+Watch the knit log for status messages:
+
+- ✅ — recent content found, source will be passed to the Research Agent
+- 🕰️ — no recent content found, source will be dropped
+
+> ⚠️ **Note:** A source marked 🕰️ is not necessarily broken — it may simply 
+> not have published anything within the `daysMax` lookback window. If a 
+> source you expect to see is being dropped consistently, verify its URL 
+> is correct and that it has published recently.
+
+```{r Check for Recent Content}
+industry_sources$keep <- "" # set up column to capture which sources have relevant content
+
+for(i in 1:dim(industry_sources)[1]){
+  cat("Checking", industry_sources$source[i], "...")
+   industry_sources$keep[i] <- has_recent_content(industry_sources$url[i])
+   has_recent_content(industry_sources$url[i])
+}
+
+```
+
+
+## Source Freshness Check — Filter
+
+This block removes any sources where no recent content was found, producing 
+a filtered table `industry_sources_recent` that is passed to the Research 
+Agent in the next section.
+
+Reducing the source list here avoids wasting tokens on stale pages and helps 
+keep API costs down. Only sources with confirmed recent content will be 
+searched by the agent.
+
+> 📝 **Note:** If `industry_sources_recent` is empty after this filter, the 
+> Research Agent loop in Section 2 will have nothing to process and the brief 
+> will not be generated. If this happens, try increasing `daysMax` in the 
+> Configuration block or verify that your sources are publishing actively.```{r}
+industry_sources_recent <- industry_sources %>% filter(keep != FALSE) # remove those with known outdated dates. 
+
+```{r Filter for Recent Content}
+industry_sources_recent <- industry_sources %>% filter(keep != FALSE) # remove those with known outdated dates. 
+
+# Stop the code if this table is empty
+if(dim(industry_sources_recent)[1]==0){stop("No recent content, brief will not be created.")}
+```
+
+
+
+## Section 2: Research Agent
+
+### Model Configuration & Agent Setup
+
+This block sets the Claude models used by each agent and loads the two agent 
+scripts that power the workflow. Both agents are sourced from the working 
+directory set in `myWD` above.
+
+**Models:**
+
+- `CLAUDE_MODEL_READ` — used by the Research Agent to read and summarize sources
+- `CLAUDE_MODEL_WRITE` — used by the Writing Agent to produce the final brief
+
+Both are currently set to `claude-sonnet-4-6`, which balances capability and 
+cost well for this workflow. If you need to swap models, update them here — 
+no changes are needed in the agent scripts themselves.
+
+**Agent scripts:**
+
+- `HomeDelivery_ResearchAgent.R` — defines the `research_agent()` function
+- `HomeDelivery_WritingAgent.R` — defines the `writing_agent()` function
+
+> ⚠️ **Note:** Both `.R` files must exist in `myWD` before knitting. If either 
+> file is missing or has been renamed, the script will fail here before any 
+> API calls are made.
+
+```{r Model setup and limits}
+# ── Claude model + RSS limits ─────────────────────────────────────────────────
+CLAUDE_MODEL_READ <- "claude-sonnet-4-6" 
+CLAUDE_MODEL_WRITE  <- "claude-sonnet-4-6"
+
+# ---- Load agents ----
+source("HomeDelivery_ResearchAgent.R")
+source("HomeDelivery_WritingAgent.R")
+```
+
+
+### Research Agent — Run
+
+This block is the core of the data collection workflow. It loops through every 
+source in `industry_sources_recent`, calls the Research Agent on each one, and 
+collects the results into `research_output`. Token usage and call performance 
+are logged to `token_log` for cost monitoring.
+
+**This block does four things in order:**
+
+1. **Initializes** the `research_output` results table and `token_log`
+2. **Loops** through each source, calling the Research Agent with retry logic
+3. **Logs** token usage, call duration, and success/error status for every call
+4. **Saves** the raw research results and token log to the output directory
+
+**What to watch for in the knit log:**
+
+- `Searching with agent: [URL]` — confirms each source is being processed
+- `Rate limited. Waiting Xs...` — the free API tier has limits; the retry 
+logic will handle this automatically up to `max_retries` attempts
+- The run summary printed at the end shows total tokens used, estimated cost, 
+and any URLs that returned no results
+
+**Output files saved to `outputDir`:**
+
+- `YYYY-MM-DD Research Agent Results.xlsx` — full research output table
+- `research_agent_log_YYYY_WXX.csv` — weekly token and performance log, 
+appended on each run
+
+> ⚠️ **Cost warning:** This block makes one API call per source in 
+> `industry_sources_recent`. With the default source list, this could be up to 15-20 calls 
+> (worst case) per run. Monitor the estimated cost printed in the run summary and adjust 
+> `daysMax` or the source list if costs are higher than expected.
+
+> 📝 **Note:** The token log is appended weekly — each run adds rows to the 
+> same file for the current week, making it easy to track cumulative costs 
+> across multiple runs.
+
+```{r Call Research Agent}
+# Initialize an empty tibble with your columns
+research_output <- tibble(
+  source_description = character(),
+  summary            = character(),
+  quotes             = character(),
+  date_updated       = character(),
+  cited_URL          = character(),
+  
+)
+
+# Set up a call with retry to catch errors and sleep between calls (limited on free version)
+# Wraps research_agent() with retry logic for HTTP 429 rate-limit errors.
+# Waits base_wait seconds on first retry, doubling on each subsequent attempt.
+call_with_retry <- function(query, model, max_retries = 1, base_wait = 120, dateLimit = daysMax) {
+  for (attempt in 1:max_retries) {
+    result <- tryCatch({
+      research_agent(query, model, daysMax)
+    }, error = function(e) {
+      if (grepl("429", conditionMessage(e))) {
+        wait_time <- base_wait * (2 ^ (attempt - 1))
+        message("Rate limited. Waiting ", wait_time, "s before retry ", attempt, "/", max_retries)
+        Sys.sleep(wait_time)
+        return(NULL)
+      } else {
+        stop(e)
+      }
+    })
+    
+    if (!is.null(result)) {
+      result$retry_count <- as.integer(attempt - 1)  # 0 = succeeded first try
+      return(result)
+    }
+  }
+  stop("Max retries reached for query: ", query)
+}
+
+# Prep to capture token usage
+token_log <- tibble(
+  # Identity
+  run_date          = character(),  # date the full script ran
+  agent             = character(),  # "research" or "brief"
+  source_topic      = character(),  # the URL/topic passed in
+  loop_index        = integer(),    # i, so you can spot which URLs fail consistently
+
+  # Tokens
+  input_tokens          = integer(),
+  output_tokens         = integer(),
+  cache_write_tokens    = integer(),  # first call only
+  cache_read_tokens     = integer(),  # subsequent calls - confirms caching is working
+
+  # Performance
+  results_returned  = integer(),    # nrow of parsed_json, or 0 if []
+  call_duration_sec = numeric(),    # Sys.time() diff - spot slow calls
+  call_timestamp    = character(),
+
+  # Outcome
+  status            = character(),  # "success", "empty", "error", "retry"
+  error_message     = character(),  # NA if success
+  retry_count       = integer(),    # how many retries were needed
+  true_token_cost   = numeric()     # all token considerations together
+)
+
+# Main loop — one API call per source. Results are appended to research_output
+# and token usage is appended to token_log on every iteration.
+raw_result <- NULL
+i <- NULL
+for (i in 1:nrow(industry_sources_recent)) {
+  
+  topic      <- unlist(industry_sources_recent[i, 2])
+  queryTopic <- paste("Use the source", topic, "to complete your role as described. Today's date is", format(Sys.Date(), "%Y-%m-%d"))
+  
+  cat("Searching with agent:", topic, "...\n")
+  
+  call_start <- Sys.time()
+  
+  raw_result <- tryCatch({
+    call_with_retry(query = queryTopic, model = CLAUDE_MODEL_READ, dateLimit = daysMax)
+  }, error = function(e) {
+    list(
+      data               = NULL,
+      input_tokens       = NA_integer_,
+      output_tokens      = NA_integer_,
+      cache_write_tokens = NA_integer_,
+      cache_read_tokens  = NA_integer_,
+      cited_URL          = NULL,
+      retry_count        = NA_integer_,
+      error_message      = conditionMessage(e)
+    )
+  })
+  
+  call_end      <- Sys.time()
+  parsed_result <- raw_result$data
+
+  # Determine status
+  if (!is.null(raw_result$error_message)) {
+    log_status   <- "error"
+    log_error    <- raw_result$error_message
+    log_results  <- 0L
+  } else if (!is.data.frame(parsed_result) || nrow(parsed_result) == 0) {
+    log_status   <- "empty"
+    log_error    <- NA_character_
+    log_results  <- 0L
+  } else {
+    log_status   <- "success"
+    log_error    <- NA_character_
+    log_results  <- nrow(parsed_result)
+  }
+  
+  # Append to token log
+  token_log <- rows_append(token_log, tibble(
+    run_date           = format(Sys.Date(), "%Y-%m-%d"),
+    agent              = "research",
+    source_topic       = topic,
+    loop_index         = as.integer(i),
+    input_tokens       = as.integer(raw_result$input_tokens),
+    output_tokens      = as.integer(raw_result$output_tokens),
+    cache_write_tokens = as.integer(raw_result$cache_write_tokens),
+    cache_read_tokens  = as.integer(raw_result$cache_read_tokens),
+    results_returned   = log_results,
+    call_duration_sec  = as.numeric(difftime(call_end, call_start, units = "secs")),
+    call_timestamp     = format(call_start, "%Y-%m-%d %H:%M:%S"),
+    status             = log_status,
+    error_message      = log_error,
+    retry_count        = as.integer(raw_result$retry_count)
+  ))
+  
+# Calculate true token cost including all cache adjustments and output tokens
+# Cache writes cost 1.25x, cache reads cost 0.10x standard input rate
+# Output tokens billed at 5x the input rate
+token_log$true_token_cost <- (
+  (token_log$input_tokens       / 1e6 * 1.00) +
+  (token_log$cache_write_tokens / 1e6 * 1.25) +
+  (token_log$cache_read_tokens  / 1e6 * 0.10) +
+  (token_log$output_tokens      / 1e6 * 5.00)
+)
+  
+  # Append to the weekly log file if it exists, or create it fresh.
+  # One log file per calendar week, identified by ISO week number.
+  if (log_status == "success") {
+    parsed_result$quotes <- unlist(parsed_result$quotes)
+    parsed_result$cited_URL <- raw_result$cited_URL
+    research_output <- rows_append(research_output, parsed_result)
+  }
+  Sys.sleep(runif(1, min = 2, max = 5))  # random 2-5 sec delay
+}
+
+# Print summary after loop completes
+cat("\n--- Token Usage Summary ---\n")
+cat("Total input tokens: ", sum(token_log$input_tokens), "\n")
+cat("Total output tokens:", sum(token_log$output_tokens), "\n")
+cat("Total tokens:       ", sum(token_log$input_tokens) + sum(token_log$output_tokens), "\n")
+
+# Print run summary
+total_input      <- sum(token_log$input_tokens,       na.rm = TRUE) +
+                    sum(token_log$cache_write_tokens,  na.rm = TRUE) +
+                    sum(token_log$cache_read_tokens,   na.rm = TRUE)
+
+cat("\n========== RUN SUMMARY =", format(Sys.Date()), "==========\n")
+cat("URLs attempted:    ", nrow(token_log), "\n")
+cat("Successful:        ", sum(token_log$status == "success"), "\n")
+cat("Empty results:     ", sum(token_log$status == "empty"), "\n")
+cat("Errors:            ", sum(token_log$status == "error"), "\n")
+cat("Total retries:     ", sum(token_log$retry_count, na.rm = TRUE), "\n")
+
+cat("\n--- Tokens ---\n")
+cat("Input tokens:      ", sum(token_log$input_tokens,       na.rm = TRUE), "\n")
+cat("Cache writes:      ", sum(token_log$cache_write_tokens, na.rm = TRUE), "\n")
+cat("Cache reads:       ", sum(token_log$cache_read_tokens,  na.rm = TRUE), "\n")
+cat("Total input:       ", total_input, "\n")
+cat("Output tokens:     ", sum(token_log$output_tokens,      na.rm = TRUE), "\n")
+cat("Cache hit rate:    ", round(
+  sum(token_log$cache_read_tokens, na.rm = TRUE) / total_input * 100, 1), "%\n")
+
+cat("\n--- Cost (est.) ---\n")
+cost_input       <- sum(token_log$input_tokens,       na.rm = TRUE) / 1e6 * 1.00
+cost_output      <- sum(token_log$output_tokens,      na.rm = TRUE) / 1e6 * 5.00
+cost_cache_write <- sum(token_log$cache_write_tokens, na.rm = TRUE) / 1e6 * 1.25
+cost_cache_read  <- sum(token_log$cache_read_tokens,  na.rm = TRUE) / 1e6 * 0.10
+cat("Estimated cost:    $", round(
+  cost_input + cost_output + cost_cache_write + cost_cache_read, 4), "\n")
+
+cat("\n--- Performance ---\n")
+cat("Avg call duration: ", round(mean(token_log$call_duration_sec, na.rm = TRUE), 1), "sec\n")
+cat("Slowest call:      ", round(max(token_log$call_duration_sec,  na.rm = TRUE), 1), "sec\n")
+cat("URLs with no results:", paste(
+  token_log$source_topic[token_log$status == "empty"], collapse = ", "), "\n")
+cat("================================================\n")
+
+# Save the research output to file 
+write.xlsx(research_output, paste0(outputDir, format(Sys.Date(), "%Y-%m-%d "), "Research Agent Results.xlsx"))
+
+# Save weekly token log to output directory — appends on each run within the same week
+log_file <- paste0(outputDir, "\research_agent_log_", format(Sys.Date(), "%Y_W%V"), ".csv")
+if (file.exists(log_file)) {
+  write.table(token_log, log_file, sep = ",", append = TRUE,
+              col.names = FALSE, row.names = FALSE)
+} else {
+  write.csv(token_log, log_file, row.names = FALSE)
+}
+```
+
+
+
+### Research Output — Quality Filter
+
+Before passing results to the Writing Agent, this block applies two filters 
+to remove low-quality or unverifiable research output:
+
+1. **Date filter** — removes any rows where `date_updated` falls outside the 
+`daysMax` lookback window. This catches cases where the Research Agent 
+returned content that passed the URL check but contained older articles.
+2. **Citation filter** — removes any rows without a `cited_URL`, ensuring 
+every finding passed to the Writing Agent is grounded in a real, verifiable 
+source.
+
+The cleaned results are saved to `research_output_clean`, which is the only 
+table passed to the Writing Agent.
+
+> ⚠️ **Note:** If `research_output_clean` is empty after these filters, the 
+> Writing Agent will have nothing to work with and the brief will not be 
+> generated. If this happens consistently, check whether the Research Agent 
+> is correctly returning `date_updated` and `cited_URL` fields in its output, 
+> and verify that the agent scripts are parsing the API response as expected.
+
+```{r Check Research Output}
+#Filter the output research table by date_updated to make sure only true recent content is passed to the brief
+today_str  <- format(Sys.Date(), "%B %d, %Y")
+cutoff_str <- format(Sys.Date() - daysMax, "%B %d, %Y")
+research_output_clean <- research_output %>% filter(anydate(date_updated)>=anydate(cutoff_str))
+
+# Filter for output that has available cited URL, to prove grounding in real source
+research_output_clean <- research_output_clean %>% filter(!is.null(cited_URL))
+
+
+# Stop the code if this table is empty
+if(dim(research_output_clean)[1]==0){stop("No recent content, brief will not be created.")}
+
+```
+
+
+
+## Section 3: Writing Agent
+
+### Writing Agent — Run
+
+This block passes the cleaned research output to the Writing Agent, which 
+synthesizes all findings into a structured VP-level intelligence brief. This 
+is a single API call — unlike the Research Agent loop, the Writing Agent 
+processes all sources together in one request.
+
+**What this block does in order:**
+
+1. **Initializes** the `token_log2` table to track Writing Agent token usage 
+separately from the Research Agent
+2. **Calls** `writing_agent()` with `research_output_clean` as its input
+3. **Logs** token usage, call duration, and success/error status
+4. **Prints** an estimated cost summary for the Writing Agent call
+5. **Renders** the finished brief to a branded PDF via `briefing_to_pdf.R`
+
+**Output:**
+
+- `raw_brief` — the finished brief text returned by the Writing Agent, ready 
+for rendering in the sections that follow
+- A dated PDF brief saved to `outputDir`
+
+**Required scripts in `myWD`:**
+
+- `HomeDelivery_ResearchAgent.R` — defines `research_agent()`
+- `HomeDelivery_WritingAgent.R` — defines `writing_agent()`
+- `briefing_to_pdf.R` — renders the finished brief to a branded PDF
+
+> ⚠️ **Cost warning:** The Writing Agent receives the full `research_output_clean` 
+> table as context, so input token count scales with the number of sources 
+> processed. A large research output table will produce a proportionally larger 
+> and more expensive Writing Agent call. The estimated cost is printed in the 
+> knit log after this block completes.
+
+> 📝 **Note:** Writing Agent token usage is logged to `token_log2` separately 
+> from the Research Agent log. If you want a full picture of per-run costs, 
+> add both estimated costs together from their respective knit log summaries.
+
+```{r Call Writing Agent}
+# Prep to capture token usage
+token_log2 <- tibble(
+  # Identity
+  run_date          = character(),  # date the full script ran
+  agent             = character(),  # "research" or "brief"
+
+  # Tokens
+  input_tokens          = integer(),
+  output_tokens         = integer(),
+
+  # Performance
+  call_duration_sec = numeric(),    # Sys.time() diff - spot slow calls
+  call_timestamp    = character(),
+
+  # Outcome
+  status            = character(),  # "success", "empty", "error", "retry"
+  error_message     = character(),  # NA if success
+  retry_count       = integer()     # how many retries were needed
+)
+
+call_start <- Sys.time()
+
+written <- tryCatch({
+  writing_agent(research_output_clean)
+}, error = function(e) {
+  list(
+    brief              = NA_character_,
+    input_tokens       = NA_integer_,
+    output_tokens      = NA_integer_,
+    call_duration_sec  = as.numeric(difftime(Sys.time(), call_start, units = "secs")),
+    retry_count        = 0L,
+    status             = "error",
+    error_message      = conditionMessage(e)
+  )
+})
+
+raw_brief <- written$brief
+
+token_log2 <- rows_append(token_log2, tibble(
+  run_date           = format(Sys.Date(), "%Y-%m-%d"),
+  agent              = "brief",
+  input_tokens       = written$input_tokens,
+  output_tokens      = written$output_tokens,
+  call_duration_sec  = written$call_duration_sec,
+  call_timestamp     = format(call_start, "%Y-%m-%d %H:%M:%S"),
+  status             = written$status,
+  error_message      = written$error_message,
+  retry_count        = written$retry_count
+))
+
+# Calculate true token cost for Writing Agent call
+# Output tokens billed at 5x the input rate — significant for long briefs
+token_log2$true_token_cost <- (
+  (token_log2$input_tokens  / 1e6 * 1.00) +
+  (token_log2$output_tokens / 1e6 * 5.00)
+)
+
+cat("\n--- Cost (est.) ---\n")
+cost_input       <- sum(token_log2$input_tokens,       na.rm = TRUE) / 1e6 * 1.00
+cost_output      <- sum(token_log2$output_tokens,      na.rm = TRUE) / 1e6 * 5.00
+cat("Estimated cost:    $", round(
+  cost_input + cost_output, 4), "\n")
+
+```
+
+
+## Section 4: Audit Records
+
+### Raw Brief — Save to File
+
+This block saves the raw text returned by the Writing Agent to a dated HTML 
+file in `outputDir` for audit and spot-check purposes. This file is separate 
+from the branded PDF distributed to stakeholders and preserves the unformatted 
+agent output exactly as returned by the API.
+
+**Output file:** `YYYY-MM-DD Raw Brief.html`
+
+> 📝 **Note:** If `raw_brief` is empty or NA, this file will still be created 
+> but will contain an empty body. The completion check in the next block will 
+> flag this condition.
+
+```{r Save Raw Brief for Audit}
+# ── Save raw_brief to HTML for audit records ─────────────────────────────────
+brief_html_path <- paste0(outputDir, format(Sys.Date(), "%Y-%m-%d "), "Raw Brief.html")
+
+html_content <- paste0(
+  "<!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset='UTF-8'>
+    <title>Raw Brief - ", format(Sys.Date(), "%Y-%m-%d"), "</title>
+    <style>
+      body { font-family: Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }
+    </style>
+  </head>
+  <body>",
+  raw_brief,
+  "</body>
+  </html>"
+)
+
+writeLines(html_content, brief_html_path)
+cat("✅ Raw brief saved to:", brief_html_path, "\n")
+```
+
+
+### Run Completion Summary
+
+This block checks whether all key steps in the workflow completed successfully 
+and renders a color-coded summary table in this document for the weekly 
+auditor to review at a glance.
+
+**Checks performed:**
+
+- **Sources passed freshness filter** — confirms at least one source had recent content
+- **Research output after quality filter** — confirms the Research Agent returned usable results
+- **Writing Agent returned a brief** — confirms `raw_brief` is populated
+- **PDF created in output directory** — confirms `briefing_to_pdf.R` completed successfully
+- **Research Agent errors** — flags if more than 2 source calls failed
+- **Long calls >90s** — flags any source call that took unusually long, named by source
+- **Runaway source cost** — flags any single source costing more than 3x the median call cost
+- **Total run cost** — flags if the combined Research and Writing Agent cost exceeds $0.50
+
+> 📝 **Note:** A yellow ⚠️ Fail on a single check does not necessarily mean 
+> the brief is unusable — use the Detail column to assess severity. For example, 
+> one slow call or one failed source is unlikely to affect brief quality, while 
+> an empty `research_output_clean` or missing PDF should be investigated 
+> immediately.
+
+> 📝 **Cost thresholds:** The $0.50 total run cost limit and 3x median runaway 
+> threshold are initial estimates. Review and recalibrate these after the first 
+> few weeks of production runs once baseline costs are established.
+
+```{r Completion Check}
+# ── Completion check ──────────────────────────────────────────────────────────
+
+# ---- Individual checks ----
+
+# 1. Sources passed freshness filter
+check_sources <- nrow(industry_sources_recent) > 0
+
+# 2. Research output after quality filter
+check_research <- nrow(research_output_clean) > 0
+
+# 3. Writing Agent returned a brief
+check_brief <- !is.na(raw_brief) && nchar(trimws(raw_brief)) > 0
+
+# 4. PDF exists in outputDir
+pdf_path <- paste0(outputDir, format(Sys.Date(), "%Y-%m-%d "), "Home Delivery Industry Briefing.pdf")
+check_pdf <- file.exists(pdf_path)
+
+# 5. Research Agent errors — flag if more than 2 sources failed
+check_errors <- sum(token_log$status == "error", na.rm = TRUE) <= 2
+error_count  <- sum(token_log$status == "error", na.rm = TRUE)
+
+# 6. Long calls — flag if any call exceeded 90 seconds
+check_duration     <- !any(token_log$call_duration_sec > 90, na.rm = TRUE)
+long_call_sources  <- token_log$source_topic[token_log$call_duration_sec > 90]
+
+# 7. Runaway source cost — flag if any single call exceeds 3x the median
+median_cost        <- median(token_log$true_token_cost, na.rm = TRUE)
+check_runaway      <- !any(token_log$true_token_cost > 3 * median_cost, na.rm = TRUE)
+runaway_sources    <- token_log$source_topic[token_log$true_token_cost > 3 * median_cost]
+
+# 8. Total run cost — flag if over $0.50
+# TODO: recalibrate threshold after first few runs if needed
+total_run_cost  <- sum(token_log$true_token_cost,  na.rm = TRUE) +
+                   sum(token_log2$true_token_cost, na.rm = TRUE)
+check_total_cost <- total_run_cost <= 0.50
+
+# ---- Build summary table ----
+completion_checks <- tibble(
+  Check = c(
+    "Sources passed freshness filter",
+    "Research output after quality filter",
+    "Writing Agent returned a brief",
+    "PDF created in output directory",
+    paste0("Research Agent errors (", error_count, " failed)"),
+    paste0("Long calls >90s (", length(long_call_sources), " flagged)"),
+    paste0("Runaway source cost >3x median (", length(runaway_sources), " flagged)"),
+    paste0("Total run cost $", round(total_run_cost, 4), " (limit $0.50)")
+  ),
+  Result = c(
+    check_sources,
+    check_research,
+    check_brief,
+    check_pdf,
+    check_errors,
+    check_duration,
+    check_runaway,
+    check_total_cost
+  )
+) %>%
+  mutate(
+    Status = if_else(Result, "✅ Pass", "⚠️ Fail"),
+    Detail = c(
+      paste0(nrow(industry_sources_recent), " sources passed"),
+      paste0(nrow(research_output_clean), " rows returned"),
+      if_else(check_brief, "Brief returned successfully", "raw_brief is empty or NA"),
+      if_else(check_pdf, "PDF found in outputDir", "PDF not found in outputDir"),
+      if_else(check_errors, 
+              paste0(error_count, " errors — within threshold"),
+              paste0(error_count, " errors — exceeds threshold of 2")),
+      if_else(check_duration,
+              "All calls within 90 seconds",
+              paste0("Slow calls: ", paste(long_call_sources, collapse = ", "))),
+      if_else(check_runaway,
+              "No runaway sources detected",
+              paste0("High cost: ", paste(runaway_sources, collapse = ", "))),
+      if_else(check_total_cost,
+              paste0("$", round(total_run_cost, 4), " — within budget"),
+              paste0("$", round(total_run_cost, 4), " — exceeds $0.50 threshold"))
+    )
+  ) %>%
+  select(Check, Status, Detail)
+
+# ---- Overall status banner ----
+all_checks_pass <- all(c(
+  check_sources, check_research, check_brief, check_pdf,
+  check_errors, check_duration, check_runaway, check_total_cost
+))
+
+banner_color  <- if_else(all_checks_pass, "#d4edda", "#fff3cd")
+banner_border <- if_else(all_checks_pass, "#28a745", "#ffc107")
+banner_text   <- if_else(
+  all_checks_pass,
+  "✅ Run completed successfully — all checks passed.",
+  "⚠️ Run completed with warnings — review flagged checks below."
+)
+
+# ---- Render in knitted HTML ----
+htmltools::div(
+  style = paste0(
+    "padding: 15px; margin-bottom: 20px; border-left: 5px solid ", banner_border, ";",
+    "background-color: ", banner_color, "; border-radius: 4px; font-size: 16px; font-weight: bold;"
+  ),
+  banner_text
+) %>% print()
+
+completion_checks %>%
+  kable(align = c("l", "c", "l")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = FALSE,
+    position          = "left"
+  ) %>%
+  row_spec(
+    which(!c(check_sources, check_research, check_brief, check_pdf,
+             check_errors, check_duration, check_runaway, check_total_cost)),
+    background = "#fff3cd"
+  ) %>%
+  row_spec(
+    which(c(check_sources, check_research, check_brief, check_pdf,
+            check_errors, check_duration, check_runaway, check_total_cost)),
+    background = "#d4edda"
+  )
+```
+
+
+
+
+
+
