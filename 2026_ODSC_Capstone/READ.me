@@ -1,0 +1,195 @@
+# Veterinary E-commerce Weekly Intelligence Brief
+### An Automated AI-Powered Industry Intelligence Tool
+**Author:** Samantha Bell  
+**Built With:** R · Claude AI (Anthropic) · Web Fetch
+
+---
+
+## Goal
+
+To build a fully automated tool that gathers the latest veterinary e-commerce 
+industry information — including newly released products, competitor activity, 
+recalls, and external market trends — from pre-determined trusted sources. 
+Claude AI agents gather, summarize, and format the content into a structured 
+weekly brief delivered to stakeholders every Monday morning.
+
+---
+
+## Audience
+
+Primary audience is the e-commerce team, with potential for disseminating 
+findings to leadership or other teams as appropriate.
+
+---
+
+## Why It Matters
+
+Staying ahead of industry trends and identifying risks and opportunities in a 
+timely manner allows the team to take targeted actions to grow the business and 
+better support the communities they serve. This tool replaces hours of manual 
+effort spent checking industry publications and writing summaries — delivering 
+consistent, grounded, executive-ready intelligence on a reliable weekly cadence.
+
+---
+
+## Role of AI in This Project
+
+This project uses two Claude AI agents working in sequence:
+
+- **Research Agent** — given a list of trusted industry source URLs, the agent 
+fetches each one using Claude's web fetch tool and extracts recent, relevant 
+findings. It returns structured data including summaries, verbatim quotes, 
+publication dates, and cited URLs.
+
+- **Writing Agent** — receives the cleaned research output and synthesizes it 
+into a structured VP-level executive brief using Claude's extended thinking 
+capability. The brief is strictly grounded in the research data — the agent 
+is explicitly instructed not to supplement findings with its own knowledge.
+
+AI saves hours of employee time that would otherwise be spent manually checking 
+web articles and writing summaries. Tight control prompts in agent setup, 
+combined with a strong R code foundation, ensure consistent and auditable 
+results week over week.
+
+---
+
+## How It Works
+
+The workflow runs automatically every Monday morning via Windows Task Scheduler 
+and is triggered by knitting a single R Markdown file. Power Automate detects 
+the finished PDF in the output folder and distributes it to stakeholders.
+industry_sources (URLs)
+│
+▼
+┌───────────────────┐
+│  Freshness Check  │  Filters sources to those with content
+│                   │  published within the lookback window
+└───────────────────┘
+│
+▼
+┌───────────────────┐
+│  Research Agent   │  Claude + web_fetch fetches each source
+│                   │  Returns structured JSON findings
+└───────────────────┘
+│
+▼
+┌───────────────────┐
+│  Quality Filter   │  Removes rows missing dates or citations
+└───────────────────┘
+│
+▼
+┌───────────────────┐
+│  Writing Agent    │  Claude synthesizes findings into
+│                   │  a structured executive brief
+└───────────────────┘
+│
+▼
+┌───────────────────┐
+│  PDF Renderer     │  briefing_to_pdf.R renders the brief
+│                   │  into a branded PDF
+└───────────────────┘
+│
+▼
+Stakeholder Distribution (Power Automate)
+---
+
+## Output
+
+The tool produces three files on each run, saved to the configured output 
+directory:
+
+| File | Description |
+|---|---|
+| `YYYY-MM-DD Research Agent Results.xlsx` | Raw structured findings from the Research Agent |
+| `YYYY-MM-DD Writing Agent Results.xlsx` | Raw brief text returned by the Writing Agent |
+| `YYYY-MM-DD Home Delivery Industry Briefing.pdf` | Branded PDF brief distributed to stakeholders |
+
+A weekly token log (`research_agent_log_YYYY_WXX.csv`) is also maintained for 
+cost monitoring and auditing.
+
+---
+
+## Project Structure
+├── HomeDelivery_Brief.Rmd          # Main script — knit this to run the workflow
+├── HomeDelivery_ResearchAgent.R    # Research Agent function
+├── HomeDelivery_WritingAgent.R     # Writing Agent function
+├── briefing_to_pdf.R               # PDF rendering function
+├── .gitignore
+└── README.md
+
+---
+
+## Weekly Audit
+
+After each Monday run, a technical reviewer confirms the following in the 
+knitted HTML document:
+
+- All three workflow sections completed without errors
+- Token log shows no more than 2 source failures
+- No single source call exceeded 90 seconds
+- Total run cost is within the expected threshold
+- The PDF brief was created and distributed successfully
+
+---
+
+## Appendix: Setup Guide
+
+### Prerequisites
+
+- R 4.2 or higher
+- RStudio (recommended) or any R-compatible environment
+- A valid [Anthropic API key](https://console.anthropic.com/)
+- Windows Task Scheduler (for automated runs)
+- Power Automate (for automated PDF distribution)
+
+### R Packages Required
+
+Install all required packages before running:
+
+```r
+install.packages(c(
+  "httr2", "jsonlite", "tidyRSS", "gtrendsR", "rvest", "xml2",
+  "RedditExtractoR", "tidytext", "pdftools", "tidyverse", "lubridate",
+  "kableExtra", "ggplot2", "scales", "openxlsx", "anytime",
+  "Cairo", "png", "grid", "gridExtra", "stringr", "gridtext", "knitr"
+))
+```
+
+### Environment Setup
+
+This project uses a `.Renviron` file to manage local paths and secrets. 
+Create a `.Renviron` file in your R home directory 
+(run `usethis::edit_r_environ()` to open it) and add the following:
+ANTHROPIC_API_KEY=your_api_key_here
+MY_WD=C:/your/path/to/repo/
+OUTPUT_DIR=C:/your/path/to/output/folder/
+
+Then update the Configuration block in `HomeDelivery_Brief.Rmd` to read 
+from these environment variables:
+
+```r
+myWD      <- Sys.getenv("MY_WD")
+outputDir <- Sys.getenv("OUTPUT_DIR")
+```
+
+Any PNG logo and accent stripe image can be substituted.
+
+### Running the Workflow
+
+1. Complete environment setup above
+2. Open `HomeDelivery_Brief.Rmd` in RStudio
+3. Click **Knit** to run the full workflow
+4. Check the knitted HTML document for the run completion summary
+5. Confirm the PDF was created in your configured output directory
+
+### Scheduling Automated Runs
+
+To schedule the workflow to run automatically every Monday morning, create 
+a Windows Task Scheduler task with the following action:
+
+**Program:** `Rscript`  
+**Arguments:** `-e "rmarkdown::render('C:/your/path/to/HomeDelivery_Brief.Rmd')"`  
+**Trigger:** Weekly, Monday, at your preferred time
+
+Ensure the machine is powered on and connected to the internet at the 
+scheduled run time.
