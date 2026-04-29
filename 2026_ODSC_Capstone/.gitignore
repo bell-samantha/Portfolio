@@ -1,0 +1,23 @@
+# ── Output files ──────────────────────────────────────────────────────────────
+*.xlsx
+*.pdf
+*.csv
+Briefs/
+
+# ── API keys and secrets ──────────────────────────────────────────────────────
+*.txt
+
+# ── Proprietary brand assets ──────────────────────────────────────────────────
+*.png
+*.jpg
+*.PNG
+*.JPG
+
+# ── R session files ───────────────────────────────────────────────────────────
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# ── Environment files (contain local paths and secrets) ───────────────────────
+.Renviron
