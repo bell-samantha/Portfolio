@@ -1,0 +1,3 @@
+# In .Renviron (never committed to GitHub):
+MY_WD="C:/Users/YourName/path/to/repo"
+OUTPUT_DIR="C:/Users/YourName/path/to/Briefs/"
